@@ -9,6 +9,7 @@
     "db:migrate": "bunx prisma migrate dev",
     "db:push": "bunx prisma db push",
     "db:studio": "bunx prisma studio",
+    "db:seed": "bun run prisma/seed.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write 'src/**/*.ts'",
@@ -40,6 +41,9 @@
     "prettier": "^3.4.0",
     "husky": "^9.0.0",
     "lint-staged": "^15.0.0"
+  },
+  "prisma": {
+    "seed": "bun run prisma/seed.ts"
   },
   "lint-staged": {
     "*.ts": [

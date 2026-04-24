@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { prisma } from "../db";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, requirePermission } from "../middleware/auth";
+import { PERMISSIONS } from "../lib/permissions";
 
 export const analyticsRoutes = new Hono();
 
@@ -35,15 +36,20 @@ analyticsRoutes.post("/event", zValidator("json", eventSchema), async (c) => {
 	return c.json({ success: true }, 201);
 });
 
-// [auth] Get stats for a post
-analyticsRoutes.get("/:postId", authMiddleware, async (c) => {
-	const postId = c.req.param("postId");
+// [auth] Get stats for a post — needs analytics:view
+analyticsRoutes.get(
+	"/:postId",
+	authMiddleware,
+	requirePermission(PERMISSIONS.ANALYTICS_VIEW),
+	async (c) => {
+		const postId = c.req.param("postId");
 
-	const stats = await prisma.analyticsEvent.groupBy({
-		by: ["event"],
-		where: { postId },
-		_count: { event: true },
-	});
+		const stats = await prisma.analyticsEvent.groupBy({
+			by: ["event"],
+			where: { postId },
+			_count: { event: true },
+		});
 
-	return c.json(stats.map((s) => ({ event: s.event, count: s._count.event })));
-});
+		return c.json(stats.map((s) => ({ event: s.event, count: s._count.event })));
+	},
+);

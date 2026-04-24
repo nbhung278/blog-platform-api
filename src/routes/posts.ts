@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { prisma } from "../db";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, requireAnyPermission } from "../middleware/auth";
+import { PERMISSIONS } from "../lib/permissions";
 import { enqueuePostIndexing } from "../queue";
 import { incrementView } from "../lib/view-counter";
 
@@ -49,16 +50,41 @@ function calcReadingTime(content: string): number {
 	return Math.ceil(wordCount / 200);
 }
 
-// [auth] List own posts
+// [auth] List posts — own posts, or all posts if user has POST_WRITE_ANY
 postsRoutes.get("/", authMiddleware, async (c) => {
 	const user = c.get("user");
+	const canSeeAll = user.permissions.includes(PERMISSIONS.POST_WRITE_ANY);
 
 	const result = await prisma.post.findMany({
-		where: { userId: user.sub },
+		where: canSeeAll ? {} : { userId: user.sub },
 		orderBy: { updatedAt: "desc" },
 	});
 
 	return c.json(result);
+});
+
+// Public: feed of all published posts from every author
+postsRoutes.get("/feed", async (c) => {
+	const limit = Math.min(Number(c.req.query("limit")) || 20, 50);
+	const cursor = c.req.query("cursor");
+
+	const result = await prisma.post.findMany({
+		where: { status: "published" },
+		orderBy: [{ publishedAt: "desc" }, { id: "desc" }],
+		take: limit + 1,
+		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+		include: {
+			user: {
+				select: { name: true, username: true, avatarUrl: true },
+			},
+		},
+	});
+
+	const hasMore = result.length > limit;
+	const items = hasMore ? result.slice(0, limit) : result;
+	const nextCursor = hasMore ? items[items.length - 1].id : null;
+
+	return c.json({ items, nextCursor });
 });
 
 // Public: get post by slug
@@ -73,7 +99,6 @@ postsRoutes.get("/:slug", async (c) => {
 		return c.json({ error: "Post not found" }, 404);
 	}
 
-	// Background view count increment
 	incrementView(post.id).catch(() => {});
 
 	return c.json(post);
@@ -99,51 +124,72 @@ postsRoutes.get("/public/:username", async (c) => {
 	return c.json(result);
 });
 
-// [auth] Create post
-postsRoutes.post("/", authMiddleware, zValidator("json", createPostSchema), async (c) => {
-	const user = c.get("user");
-	const body = c.req.valid("json");
+// [auth] Create post — needs write:own or write:any. Publish needs publish:any.
+postsRoutes.post(
+	"/",
+	authMiddleware,
+	requireAnyPermission(PERMISSIONS.POST_WRITE_OWN, PERMISSIONS.POST_WRITE_ANY),
+	zValidator("json", createPostSchema),
+	async (c) => {
+		const user = c.get("user");
+		const body = c.req.valid("json");
 
-	const slug = slugify(body.title);
-	const readingTime = calcReadingTime(body.content);
-	const publishedAt = body.status === "published" ? new Date() : null;
+		if (body.status === "published" && !user.permissions.includes(PERMISSIONS.POST_PUBLISH_ANY)) {
+			return c.json({ error: "Forbidden: cannot publish" }, 403);
+		}
 
-	const post = await prisma.post.create({
-		data: {
-			userId: user.sub,
-			title: body.title,
-			slug,
-			content: body.content,
-			excerpt: body.excerpt,
-			coverUrl: body.coverUrl,
-			status: body.status,
-			publishedAt,
-			readingTime,
-			tags: body.tags,
-			metaTitle: body.metaTitle,
-			metaDesc: body.metaDesc,
-		},
-	});
+		const slug = slugify(body.title);
+		const readingTime = calcReadingTime(body.content);
+		const publishedAt = body.status === "published" ? new Date() : null;
 
-	// Enqueue for RAG indexing
-	await enqueuePostIndexing(post.id, user.sub);
+		const post = await prisma.post.create({
+			data: {
+				userId: user.sub,
+				title: body.title,
+				slug,
+				content: body.content,
+				excerpt: body.excerpt,
+				coverUrl: body.coverUrl,
+				status: body.status,
+				publishedAt,
+				readingTime,
+				tags: body.tags,
+				metaTitle: body.metaTitle,
+				metaDesc: body.metaDesc,
+			},
+		});
 
-	return c.json(post, 201);
-});
+		await enqueuePostIndexing(post.id, user.sub);
 
-// [auth] Update post with optimistic locking
+		return c.json(post, 201);
+	},
+);
+
+// [auth] Update post — author can update own, admin (write:any) can update any
 postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), async (c) => {
 	const user = c.get("user");
 	const postId = c.req.param("id");
 	const body = c.req.valid("json");
 
-	const existing = await prisma.post.findFirst({
-		where: { id: postId, userId: user.sub },
-		select: { version: true },
+	const existing = await prisma.post.findUnique({
+		where: { id: postId },
+		select: { version: true, userId: true },
 	});
 
 	if (!existing) {
 		return c.json({ error: "Post not found" }, 404);
+	}
+
+	const isOwner = existing.userId === user.sub;
+	const canWriteAny = user.permissions.includes(PERMISSIONS.POST_WRITE_ANY);
+	const canWriteOwn = user.permissions.includes(PERMISSIONS.POST_WRITE_OWN);
+
+	if (!canWriteAny && !(isOwner && canWriteOwn)) {
+		return c.json({ error: "Forbidden" }, 403);
+	}
+
+	if (body.status === "published" && !user.permissions.includes(PERMISSIONS.POST_PUBLISH_ANY)) {
+		return c.json({ error: "Forbidden: cannot publish" }, 403);
 	}
 
 	if (existing.version !== body.version) {
@@ -164,25 +210,35 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 		},
 	});
 
-	// Re-index if content changed
 	if (updates.content) {
-		await enqueuePostIndexing(postId, user.sub);
+		await enqueuePostIndexing(postId, existing.userId);
 	}
 
 	return c.json(updated);
 });
 
-// [auth] Delete post
+// [auth] Delete post — owner with delete:own, or anyone with delete:any
 postsRoutes.delete("/:id", authMiddleware, async (c) => {
 	const user = c.get("user");
 	const postId = c.req.param("id");
 
-	try {
-		await prisma.post.delete({
-			where: { id: postId, userId: user.sub },
-		});
-		return c.json({ success: true });
-	} catch {
+	const existing = await prisma.post.findUnique({
+		where: { id: postId },
+		select: { userId: true },
+	});
+
+	if (!existing) {
 		return c.json({ error: "Post not found" }, 404);
 	}
+
+	const isOwner = existing.userId === user.sub;
+	const canDeleteAny = user.permissions.includes(PERMISSIONS.POST_DELETE_ANY);
+	const canDeleteOwn = user.permissions.includes(PERMISSIONS.POST_DELETE_OWN);
+
+	if (!canDeleteAny && !(isOwner && canDeleteOwn)) {
+		return c.json({ error: "Forbidden" }, 403);
+	}
+
+	await prisma.post.delete({ where: { id: postId } });
+	return c.json({ success: true });
 });

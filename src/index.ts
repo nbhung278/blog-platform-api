@@ -5,16 +5,23 @@ import { authRoutes } from "./routes/auth";
 import { postsRoutes } from "./routes/posts";
 import { aiRoutes } from "./routes/ai";
 import { analyticsRoutes } from "./routes/analytics";
+import { usersRoutes } from "./routes/users";
+import { rolesRoutes } from "./routes/roles";
 import { startWorkers } from "./queue";
 import { startViewCountFlusher } from "./lib/view-counter";
 
 const app = new Hono();
 
 app.use("*", logger());
+const allowedOrigins = [
+	process.env.APP_URL || "http://localhost:5173",
+	process.env.ADMIN_URL || "http://localhost:5174",
+];
+
 app.use(
 	"*",
 	cors({
-		origin: process.env.APP_URL || "http://localhost:5173",
+		origin: (origin) => (allowedOrigins.includes(origin) ? origin : null),
 		credentials: true,
 	}),
 );
@@ -23,6 +30,8 @@ app.route("/api/auth", authRoutes);
 app.route("/api/posts", postsRoutes);
 app.route("/api/ai", aiRoutes);
 app.route("/api/analytics", analyticsRoutes);
+app.route("/api/users", usersRoutes);
+app.route("/api/roles", rolesRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 
