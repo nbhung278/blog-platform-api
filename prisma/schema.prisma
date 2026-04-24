@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String
+  username     String   @unique
+  bio          String?
+  avatarUrl    String?  @map("avatar_url")
+  plan         String   @default("free")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  posts        Post[]
+  postChunks   PostChunk[]
+  chatSessions ChatSession[]
+  comments     Comment[]
+
+  @@map("users")
+}
+
+model Post {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  title        String
+  slug         String
+  content      String
+  excerpt      String?
+  coverUrl     String?   @map("cover_url")
+  ogImageUrl   String?   @map("og_image_url")
+  status       String    @default("draft")
+  publishedAt  DateTime? @map("published_at")
+  readingTime  Int       @default(0) @map("reading_time")
+  viewCount    Int       @default(0) @map("view_count")
+  likeCount    Int       @default(0) @map("like_count")
+  tags         String[]  @default([])
+  metaTitle    String?   @map("meta_title")
+  metaDesc     String?   @map("meta_desc")
+  version      Int       @default(1)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postChunks      PostChunk[]
+  analyticsEvents AnalyticsEvent[]
+  comments        Comment[]
+
+  @@unique([userId, slug])
+  @@index([status])
+  @@index([publishedAt(sort: Desc)])
+  @@index([userId])
+  @@map("posts")
+}
+
+model PostChunk {
+  id        String   @id @default(uuid()) @db.Uuid
+  postId    String   @map("post_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  chunkIdx  Int      @map("chunk_idx")
+  heading   String?
+  content   String
+  // embedding vector(1536) managed via raw SQL (Prisma doesn't support pgvector natively)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("post_chunks")
+}
+
+model AnalyticsEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  postId    String?  @map("post_id") @db.Uuid
+  sessionId String?  @map("session_id")
+  event     String
+  meta      Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post Post? @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId, event])
+  @@index([createdAt(sort: Desc)])
+  @@map("analytics_events")
+}
+
+model ChatSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  messages  Json     @default("[]")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("chat_sessions")
+}
+
+model Comment {
+  id        String   @id @default(uuid()) @db.Uuid
+  postId    String   @map("post_id") @db.Uuid
+  userId    String?  @map("user_id") @db.Uuid
+  parentId  String?  @map("parent_id") @db.Uuid
+  guestName String?  @map("guest_name")
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post Post  @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("comments")
+}
