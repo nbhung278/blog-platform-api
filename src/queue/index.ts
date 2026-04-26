@@ -20,7 +20,7 @@ export function startWorkers(): void {
 
 			const post = await prisma.post.findUnique({
 				where: { id: postId },
-				select: { content: true },
+				select: { contentMd: true },
 			});
 
 			if (!post) {
@@ -28,7 +28,7 @@ export function startWorkers(): void {
 				return;
 			}
 
-			const chunks = chunkByHeadings(post.content);
+			const chunks = chunkByHeadings(post.contentMd);
 
 			// Delete old chunks
 			await prisma.postChunk.deleteMany({ where: { postId } });

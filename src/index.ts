@@ -7,6 +7,7 @@ import { aiRoutes } from "./routes/ai";
 import { analyticsRoutes } from "./routes/analytics";
 import { usersRoutes } from "./routes/users";
 import { rolesRoutes } from "./routes/roles";
+import { uploadsRoutes } from "./routes/uploads";
 import { startWorkers } from "./queue";
 import { startViewCountFlusher } from "./lib/view-counter";
 
@@ -32,6 +33,7 @@ app.route("/api/ai", aiRoutes);
 app.route("/api/analytics", analyticsRoutes);
 app.route("/api/users", usersRoutes);
 app.route("/api/roles", rolesRoutes);
+app.route("/api/uploads", uploadsRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 

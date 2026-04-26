@@ -85,7 +85,8 @@ model Post {
   userId       String    @map("user_id") @db.Uuid
   title        String
   slug         String
-  content      String
+  contentMd    String    @map("content_md")
+  contentHtml  String    @map("content_html")
   excerpt      String?
   coverUrl     String?   @map("cover_url")
   ogImageUrl   String?   @map("og_image_url")

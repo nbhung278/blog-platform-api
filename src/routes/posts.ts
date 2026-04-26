@@ -5,16 +5,24 @@ import { prisma } from "../db";
 import { authMiddleware, requireAnyPermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { enqueuePostIndexing } from "../queue";
-import { incrementView } from "../lib/view-counter";
+import { incrementView, getPendingViews, getPendingViewsMap } from "../lib/view-counter";
 
 export const postsRoutes = new Hono();
 
+// draft     — author saves, not visible to anyone but the author
+// pending   — author submitted for review, awaiting moderator
+// published — live on the public blog
+// rejected  — moderator rejected; author can edit and resubmit
+const POST_STATUSES = ["draft", "pending", "published", "rejected"] as const;
+type PostStatus = (typeof POST_STATUSES)[number];
+
 const createPostSchema = z.object({
 	title: z.string().min(1),
-	content: z.string(),
+	contentMd: z.string(),
+	contentHtml: z.string(),
 	excerpt: z.string().optional(),
-	coverUrl: z.string().url().optional(),
-	status: z.enum(["draft", "published"]).default("draft"),
+	coverUrl: z.string().url().nullable().optional(),
+	status: z.enum(POST_STATUSES).default("draft"),
 	tags: z.array(z.string()).default([]),
 	metaTitle: z.string().optional(),
 	metaDesc: z.string().optional(),
@@ -22,10 +30,11 @@ const createPostSchema = z.object({
 
 const updatePostSchema = z.object({
 	title: z.string().min(1).optional(),
-	content: z.string().optional(),
+	contentMd: z.string().optional(),
+	contentHtml: z.string().optional(),
 	excerpt: z.string().optional(),
 	coverUrl: z.string().url().nullable().optional(),
-	status: z.enum(["draft", "published"]).optional(),
+	status: z.enum(POST_STATUSES).optional(),
 	tags: z.array(z.string()).optional(),
 	metaTitle: z.string().optional(),
 	metaDesc: z.string().optional(),
@@ -45,22 +54,75 @@ function slugify(title: string): string {
 	);
 }
 
-function calcReadingTime(content: string): number {
-	const wordCount = content.split(/\s+/).filter(Boolean).length;
+function calcReadingTime(markdown: string): number {
+	const wordCount = markdown.split(/\s+/).filter(Boolean).length;
 	return Math.ceil(wordCount / 200);
 }
 
-// [auth] List posts — own posts, or all posts if user has POST_WRITE_ANY
+// What status is the user allowed to assign?
+//   - POST_PUBLISH_ANY → can set anything (publish/reject moderation actions)
+//   - otherwise        → only draft/pending (submit for review)
+function assertCanSetStatus(
+	status: PostStatus | undefined,
+	permissions: string[],
+): { ok: true } | { ok: false; reason: string } {
+	if (!status) return { ok: true };
+	if (status === "published" || status === "rejected") {
+		if (!permissions.includes(PERMISSIONS.POST_PUBLISH_ANY)) {
+			return { ok: false, reason: `Forbidden: cannot set status to ${status}` };
+		}
+	}
+	return { ok: true };
+}
+
+// Merge unflushed Redis pending views into a list of posts in one MGET.
+async function withPendingViews<T extends { id: string; viewCount: number }>(
+	posts: T[],
+): Promise<T[]> {
+	if (posts.length === 0) return posts;
+	const pending = await getPendingViewsMap(posts.map((p) => p.id));
+	if (pending.size === 0) return posts;
+	return posts.map((p) => ({ ...p, viewCount: p.viewCount + (pending.get(p.id) ?? 0) }));
+}
+
+// [auth] List posts — own posts, or all posts if user has POST_WRITE_ANY / POST_REVIEW
 postsRoutes.get("/", authMiddleware, async (c) => {
 	const user = c.get("user");
-	const canSeeAll = user.permissions.includes(PERMISSIONS.POST_WRITE_ANY);
+	const scope = c.req.query("scope"); // "mine" | "all"
+	const statusFilter = c.req.query("status") as PostStatus | undefined;
+
+	const canSeeAll =
+		user.permissions.includes(PERMISSIONS.POST_WRITE_ANY) ||
+		user.permissions.includes(PERMISSIONS.POST_REVIEW);
+
+	const wantAll = scope === "all" && canSeeAll;
 
 	const result = await prisma.post.findMany({
-		where: canSeeAll ? {} : { userId: user.sub },
+		where: {
+			...(wantAll ? {} : { userId: user.sub }),
+			...(statusFilter && POST_STATUSES.includes(statusFilter) ? { status: statusFilter } : {}),
+		},
 		orderBy: { updatedAt: "desc" },
+		select: {
+			id: true,
+			title: true,
+			slug: true,
+			excerpt: true,
+			coverUrl: true,
+			status: true,
+			publishedAt: true,
+			readingTime: true,
+			viewCount: true,
+			likeCount: true,
+			tags: true,
+			version: true,
+			createdAt: true,
+			updatedAt: true,
+			user: { select: { id: true, name: true, username: true, avatarUrl: true } },
+		},
 	});
 
-	return c.json(result);
+	return c.json(await withPendingViews(result));
 });
 
 // Public: feed of all published posts from every author
@@ -84,7 +146,37 @@ postsRoutes.get("/feed", async (c) => {
 	const items = hasMore ? result.slice(0, limit) : result;
 	const nextCursor = hasMore ? items[items.length - 1].id : null;
 
-	return c.json({ items, nextCursor });
+	return c.json({ items: await withPendingViews(items), nextCursor });
+});
+
+// [auth] Get a single post by id (for editing / preview).
+// Author can read own, moderator/admin can read any.
+postsRoutes.get("/id/:id", authMiddleware, async (c) => {
+	const user = c.get("user");
+	const id = c.req.param("id");
+
+	const post = await prisma.post.findUnique({
+		where: { id },
+		include: {
+			user: { select: { id: true, name: true, username: true, avatarUrl: true } },
+		},
+	});
+
+	if (!post) {
+		return c.json({ error: "Post not found" }, 404);
+	}
+
+	const isOwner = post.userId === user.sub;
+	const canSeeAny =
+		user.permissions.includes(PERMISSIONS.POST_WRITE_ANY) ||
+		user.permissions.includes(PERMISSIONS.POST_REVIEW);
+
+	if (!isOwner && !canSeeAny) {
+		return c.json({ error: "Forbidden" }, 403);
+	}
+
+	const pending = await getPendingViews(post.id);
+	return c.json({ ...post, viewCount: post.viewCount + pending });
 });
 
 // Public: get post by slug
@@ -99,9 +191,11 @@ postsRoutes.get("/:slug", async (c) => {
 		return c.json({ error: "Post not found" }, 404);
 	}
 
-	incrementView(post.id).catch(() => {});
+	// Increment first, then read pending — guarantees the current view is reflected.
+	await incrementView(post.id).catch(() => {});
+	const pending = await getPendingViews(post.id);
 
-	return c.json(post);
+	return c.json({ ...post, viewCount: post.viewCount + pending });
 });
 
 // Public: list posts by username
@@ -121,10 +215,10 @@ postsRoutes.get("/public/:username", async (c) => {
 		},
 	});
 
-	return c.json(result);
+	return c.json(await withPendingViews(result));
 });
 
-// [auth] Create post — needs write:own or write:any. Publish needs publish:any.
+// [auth] Create post — needs write:own or write:any.
 postsRoutes.post(
 	"/",
 	authMiddleware,
@@ -134,12 +228,13 @@ postsRoutes.post(
 		const user = c.get("user");
 		const body = c.req.valid("json");
 
-		if (body.status === "published" && !user.permissions.includes(PERMISSIONS.POST_PUBLISH_ANY)) {
-			return c.json({ error: "Forbidden: cannot publish" }, 403);
+		const guard = assertCanSetStatus(body.status, user.permissions);
+		if (!guard.ok) {
+			return c.json({ error: guard.reason }, 403);
 		}
 
 		const slug = slugify(body.title);
-		const readingTime = calcReadingTime(body.content);
+		const readingTime = calcReadingTime(body.contentMd);
 		const publishedAt = body.status === "published" ? new Date() : null;
 
 		const post = await prisma.post.create({
@@ -147,7 +242,8 @@ postsRoutes.post(
 				userId: user.sub,
 				title: body.title,
 				slug,
-				content: body.content,
+				contentMd: body.contentMd,
+				contentHtml: body.contentHtml,
 				excerpt: body.excerpt,
 				coverUrl: body.coverUrl,
 				status: body.status,
@@ -165,7 +261,7 @@ postsRoutes.post(
 	},
 );
 
-// [auth] Update post — author can update own, admin (write:any) can update any
+// [auth] Update post — author can update own, admin (write:any) can update any.
 postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), async (c) => {
 	const user = c.get("user");
 	const postId = c.req.param("id");
@@ -173,7 +269,7 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 
 	const existing = await prisma.post.findUnique({
 		where: { id: postId },
-		select: { version: true, userId: true },
+		select: { version: true, userId: true, status: true, publishedAt: true },
 	});
 
 	if (!existing) {
@@ -188,8 +284,9 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 		return c.json({ error: "Forbidden" }, 403);
 	}
 
-	if (body.status === "published" && !user.permissions.includes(PERMISSIONS.POST_PUBLISH_ANY)) {
-		return c.json({ error: "Forbidden: cannot publish" }, 403);
+	const guard = assertCanSetStatus(body.status, user.permissions);
+	if (!guard.ok) {
+		return c.json({ error: guard.reason }, 403);
 	}
 
 	if (existing.version !== body.version) {
@@ -197,8 +294,10 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 	}
 
 	const { version, ...updates } = body;
-	const readingTime = updates.content ? calcReadingTime(updates.content) : undefined;
-	const publishedAt = updates.status === "published" ? new Date() : undefined;
+	const readingTime = updates.contentMd ? calcReadingTime(updates.contentMd) : undefined;
+	// Set publishedAt when transitioning to published for the first time.
+	const publishedAt =
+		updates.status === "published" && existing.status !== "published" ? new Date() : undefined;
 
 	const updated = await prisma.post.update({
 		where: { id: postId },
@@ -210,7 +309,7 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 		},
 	});
 
-	if (updates.content) {
+	if (updates.contentMd) {
 		await enqueuePostIndexing(postId, existing.userId);
 	}
 
