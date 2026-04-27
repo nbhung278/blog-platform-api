@@ -26,6 +26,7 @@ const createPostSchema = z.object({
 	tags: z.array(z.string()).default([]),
 	metaTitle: z.string().optional(),
 	metaDesc: z.string().optional(),
+	categoryIds: z.array(z.string().uuid()).min(1, "At least one category is required"),
 });
 
 const updatePostSchema = z.object({
@@ -39,6 +40,7 @@ const updatePostSchema = z.object({
 	metaTitle: z.string().optional(),
 	metaDesc: z.string().optional(),
 	version: z.number().int(),
+	categoryIds: z.array(z.string().uuid()).min(1, "At least one category is required").optional(),
 });
 
 function slugify(title: string): string {
@@ -90,6 +92,10 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 	const user = c.get("user");
 	const scope = c.req.query("scope"); // "mine" | "all"
 	const statusFilter = c.req.query("status") as PostStatus | undefined;
+	const categoryId = c.req.query("categoryId");
+	const q = (c.req.query("q") ?? "").trim();
+	const page = Math.max(1, Number(c.req.query("page")) || 1);
+	const limit = Math.min(100, Math.max(1, Number(c.req.query("limit")) || 20));
 
 	const canSeeAll =
 		user.permissions.includes(PERMISSIONS.POST_WRITE_ANY) ||
@@ -97,33 +103,77 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 
 	const wantAll = scope === "all" && canSeeAll;
 
-	const result = await prisma.post.findMany({
-		where: {
-			...(wantAll ? {} : { userId: user.sub }),
-			...(statusFilter && POST_STATUSES.includes(statusFilter) ? { status: statusFilter } : {}),
-		},
-		orderBy: { updatedAt: "desc" },
-		select: {
-			id: true,
-			title: true,
-			slug: true,
-			excerpt: true,
-			coverUrl: true,
-			status: true,
-			publishedAt: true,
-			readingTime: true,
-			viewCount: true,
-			likeCount: true,
-			tags: true,
-			version: true,
-			createdAt: true,
-			updatedAt: true,
-			user: { select: { id: true, name: true, username: true, avatarUrl: true } },
-		},
-	});
+	const where = {
+		...(wantAll ? {} : { userId: user.sub }),
+		...(statusFilter && POST_STATUSES.includes(statusFilter) ? { status: statusFilter } : {}),
+		...(categoryId ? { categories: { some: { categoryId } } } : {}),
+		...(q ? { title: { contains: q, mode: "insensitive" as const } } : {}),
+	};
 
-	return c.json(await withPendingViews(result));
+	const [total, result] = await Promise.all([
+		prisma.post.count({ where }),
+		prisma.post.findMany({
+			where,
+			orderBy: { updatedAt: "desc" },
+			skip: (page - 1) * limit,
+			take: limit,
+			select: {
+				id: true,
+				title: true,
+				slug: true,
+				excerpt: true,
+				coverUrl: true,
+				status: true,
+				publishedAt: true,
+				readingTime: true,
+				viewCount: true,
+				likeCount: true,
+				tags: true,
+				version: true,
+				createdAt: true,
+				updatedAt: true,
+				user: { select: { id: true, name: true, username: true, avatarUrl: true } },
+				categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
+			},
+		}),
+	]);
+
+	return c.json({ data: await withPendingViews(result), total, page, limit });
 });
+
+// [auth] Bulk delete posts
+postsRoutes.post(
+	"/bulk-delete",
+	authMiddleware,
+	zValidator("json", z.object({ ids: z.array(z.string().uuid()).min(1) })),
+	async (c) => {
+		const user = c.get("user");
+		const { ids } = c.req.valid("json");
+
+		const canDeleteAny = user.permissions.includes(PERMISSIONS.POST_DELETE_ANY);
+		const canDeleteOwn = user.permissions.includes(PERMISSIONS.POST_DELETE_OWN);
+
+		// Fetch all posts to check ownership
+		const posts = await prisma.post.findMany({
+			where: { id: { in: ids } },
+			select: { id: true, userId: true },
+		});
+
+		// If user can delete any, skip ownership check
+		if (!canDeleteAny) {
+			const forbidden = posts.filter((p) => p.userId !== user.sub);
+			if (forbidden.length > 0) {
+				return c.json({ error: "Forbidden: you do not own some of these posts" }, 403);
+			}
+			if (!canDeleteOwn) {
+				return c.json({ error: "Forbidden" }, 403);
+			}
+		}
+
+		await prisma.post.deleteMany({ where: { id: { in: ids } } });
+		return c.json({ deleted: ids.length });
+	},
+);
 
 // Public: feed of all published posts from every author
 postsRoutes.get("/feed", async (c) => {
@@ -136,9 +186,8 @@ postsRoutes.get("/feed", async (c) => {
 		take: limit + 1,
 		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
 		include: {
-			user: {
-				select: { name: true, username: true, avatarUrl: true },
-			},
+			user: { select: { name: true, username: true, avatarUrl: true } },
+			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
 		},
 	});
 
@@ -168,6 +217,7 @@ postsRoutes.get("/search", async (c) => {
 		take: 50,
 		include: {
 			user: { select: { name: true, username: true, avatarUrl: true } },
+			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
 		},
 	});
 
@@ -185,6 +235,7 @@ postsRoutes.get("/id/:id", authMiddleware, async (c) => {
 		where: { id },
 		include: {
 			user: { select: { id: true, name: true, username: true, avatarUrl: true } },
+			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
 		},
 	});
 
@@ -278,6 +329,12 @@ postsRoutes.post(
 				tags: body.tags,
 				metaTitle: body.metaTitle,
 				metaDesc: body.metaDesc,
+				categories: {
+					create: body.categoryIds.map((categoryId) => ({ categoryId })),
+				},
+			},
+			include: {
+				categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
 			},
 		});
 
@@ -319,7 +376,7 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 		return c.json({ error: "Conflict" }, 409);
 	}
 
-	const { version, ...updates } = body;
+	const { version, categoryIds, ...updates } = body;
 	const readingTime = updates.contentMd ? calcReadingTime(updates.contentMd) : undefined;
 	// Set publishedAt when transitioning to published for the first time.
 	const publishedAt =
@@ -332,6 +389,15 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 			...(readingTime !== undefined && { readingTime }),
 			...(publishedAt !== undefined && { publishedAt }),
 			version: version + 1,
+			...(categoryIds !== undefined && {
+				categories: {
+					deleteMany: {},
+					create: categoryIds.map((categoryId) => ({ categoryId })),
+				},
+			}),
+		},
+		include: {
+			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
 		},
 	});
 

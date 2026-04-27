@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { authRoutes } from "./routes/auth";
 import { postsRoutes } from "./routes/posts";
+import { categoriesRoutes } from "./routes/categories";
 import { aiRoutes } from "./routes/ai";
 import { analyticsRoutes } from "./routes/analytics";
 import { usersRoutes } from "./routes/users";
@@ -29,6 +30,7 @@ app.use(
 
 app.route("/api/auth", authRoutes);
 app.route("/api/posts", postsRoutes);
+app.route("/api/categories", categoriesRoutes);
 app.route("/api/ai", aiRoutes);
 app.route("/api/analytics", analyticsRoutes);
 app.route("/api/users", usersRoutes);
