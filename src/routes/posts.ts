@@ -149,6 +149,32 @@ postsRoutes.get("/feed", async (c) => {
 	return c.json({ items: await withPendingViews(items), nextCursor });
 });
 
+// Public: full-text search across title, tags, and author (name/username)
+postsRoutes.get("/search", async (c) => {
+	const q = (c.req.query("q") ?? "").trim();
+	if (!q) return c.json({ items: [], total: 0 });
+
+	const result = await prisma.post.findMany({
+		where: {
+			status: "published",
+			OR: [
+				{ title: { contains: q, mode: "insensitive" } },
+				{ tags: { has: q } },
+				{ user: { name: { contains: q, mode: "insensitive" } } },
+				{ user: { username: { contains: q, mode: "insensitive" } } },
+			],
+		},
+		orderBy: { publishedAt: "desc" },
+		take: 50,
+		include: {
+			user: { select: { name: true, username: true, avatarUrl: true } },
+		},
+	});
+
+	const items = await withPendingViews(result);
+	return c.json({ items, total: items.length });
+});
+
 // [auth] Get a single post by id (for editing / preview).
 // Author can read own, moderator/admin can read any.
 postsRoutes.get("/id/:id", authMiddleware, async (c) => {
