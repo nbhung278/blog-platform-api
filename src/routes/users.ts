@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { hash } from "bcrypt";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission, type JWTPayload } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
@@ -134,7 +135,10 @@ usersRoutes.delete("/:id", async (c) => {
 	try {
 		await prisma.user.delete({ where: { id } });
 		return c.json({ success: true });
-	} catch {
-		return c.json({ error: "User not found" }, 404);
+	} catch (err) {
+		if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+			return c.json({ error: "User not found" }, 404);
+		}
+		throw err;
 	}
 });

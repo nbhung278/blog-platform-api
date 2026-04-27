@@ -26,22 +26,34 @@ export async function getPendingViewsMap(postIds: string[]): Promise<Map<string,
 	return map;
 }
 
+let flushing = false;
+
 async function flushViewCounts(): Promise<void> {
-	const keys = await redis.keys("viewcount:*");
+	if (flushing) return;
+	flushing = true;
 
-	for (const key of keys) {
-		const count = await redis.getdel(key);
-		if (!count || count === "0") continue;
+	try {
+		// SCAN instead of KEYS to avoid blocking Redis on large keyspaces.
+		const keys: string[] = [];
+		let cursor = 0;
+		do {
+			const [next, batch] = await redis.scan(cursor, "MATCH", "viewcount:*", "COUNT", 100);
+			cursor = Number(next);
+			keys.push(...batch);
+		} while (cursor !== 0);
 
-		const postId = key.replace("viewcount:", "");
-		await prisma.post.update({
-			where: { id: postId },
-			data: { viewCount: { increment: Number(count) } },
-		});
-	}
+		for (const key of keys) {
+			const count = await redis.getdel(key);
+			if (!count || count === "0") continue;
 
-	if (keys.length > 0) {
-		console.log(`[view-counter] Flushed ${keys.length} view counts`);
+			const postId = key.replace("viewcount:", "");
+			await prisma.post.update({
+				where: { id: postId },
+				data: { viewCount: { increment: Number(count) } },
+			});
+		}
+	} finally {
+		flushing = false;
 	}
 }
 

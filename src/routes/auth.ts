@@ -20,7 +20,7 @@ const passwordSchema = z
 
 const registerSchema = z.object({
 	email: z.string().email(),
-	password: z.string().min(8),
+	password: passwordSchema,
 	name: z.string().min(1),
 	username: z
 		.string()
@@ -129,25 +129,36 @@ authRoutes.post(
 	},
 );
 
-authRoutes.post("/register", zValidator("json", registerSchema), async (c) => {
-	const { email, password, name, username } = c.req.valid("json");
+authRoutes.post(
+	"/register",
+	rateLimit({ keyPrefix: "register", limit: 5, windowSeconds: 60 * 15 }),
+	zValidator("json", registerSchema),
+	async (c) => {
+		if (process.env.ALLOW_REGISTRATION !== "true") {
+			return c.json({ error: "Registration is not open" }, 403);
+		}
 
-	const existing = await prisma.user.findUnique({ where: { email } });
-	if (existing) {
-		return c.json({ error: "Email already registered" }, 400);
-	}
+		const { email, password, name, username } = c.req.valid("json");
 
-	const passwordHash = await hash(password, 10);
+		const existing = await prisma.user.findFirst({
+			where: { OR: [{ email }, { username }] },
+		});
+		if (existing) {
+			return c.json({ error: "Email or username already taken" }, 400);
+		}
 
-	const user = await prisma.user.create({
-		data: { email, passwordHash, name, username },
-		select: { id: true, email: true, username: true, name: true },
-	});
+		const passwordHash = await hash(password, 10);
 
-	const token = await issueToken({ ...user, mustChangePassword: false });
+		const user = await prisma.user.create({
+			data: { email, passwordHash, name, username },
+			select: { id: true, email: true, username: true, name: true },
+		});
 
-	return c.json({ token, user }, 201);
-});
+		const token = await issueToken({ ...user, mustChangePassword: false });
+
+		return c.json({ token, user }, 201);
+	},
+);
 
 authRoutes.post(
 	"/login",

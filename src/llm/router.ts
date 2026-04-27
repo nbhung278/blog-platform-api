@@ -27,7 +27,7 @@ class OpenAIProvider implements LLMProvider {
 		options?: { maxTokens?: number; temperature?: number },
 	): Promise<string> {
 		const response = await this.client.chat.completions.create({
-			model: "gpt-4o",
+			model: process.env.OPENAI_MODEL || "gpt-4o",
 			messages,
 			max_tokens: options?.maxTokens || 1024,
 			temperature: options?.temperature || 0.7,
@@ -37,7 +37,7 @@ class OpenAIProvider implements LLMProvider {
 
 	async *stream(messages: Message[], options?: { maxTokens?: number }): AsyncIterable<string> {
 		const response = await this.client.chat.completions.create({
-			model: "gpt-4o",
+			model: process.env.OPENAI_MODEL || "gpt-4o",
 			messages,
 			max_tokens: options?.maxTokens || 1024,
 			stream: true,
@@ -75,7 +75,7 @@ class AnthropicProvider implements LLMProvider {
 		const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
 		const response = await this.client.messages.create({
-			model: "claude-sonnet-4-5-20250514",
+			model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5-20250514",
 			max_tokens: options?.maxTokens || 1024,
 			temperature: options?.temperature || 0.7,
 			system: systemMessage?.content,
@@ -93,7 +93,7 @@ class AnthropicProvider implements LLMProvider {
 		const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
 		const stream = this.client.messages.stream({
-			model: "claude-sonnet-4-5-20250514",
+			model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5-20250514",
 			max_tokens: options?.maxTokens || 1024,
 			system: systemMessage?.content,
 			messages: nonSystemMessages.map((m) => ({

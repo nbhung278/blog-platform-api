@@ -25,7 +25,7 @@ aiRoutes.post("/chat", authMiddleware, zValidator("json", chatSchema), async (c)
 
 	if (sessionId) {
 		const session = await prisma.chatSession.findUnique({
-			where: { id: sessionId },
+			where: { id: sessionId, userId: user.sub },
 		});
 
 		if (session) {
@@ -66,7 +66,7 @@ ${context}
 
 		if (currentSessionId) {
 			await prisma.chatSession.update({
-				where: { id: currentSessionId },
+				where: { id: currentSessionId, userId: user.sub },
 				data: { messages: newHistory },
 			});
 		} else {

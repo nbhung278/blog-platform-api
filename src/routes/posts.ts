@@ -192,7 +192,7 @@ postsRoutes.get("/:slug", async (c) => {
 	}
 
 	// Increment first, then read pending — guarantees the current view is reflected.
-	await incrementView(post.id).catch(() => {});
+	await incrementView(post.id).catch((err) => console.error("[view] increment failed:", err));
 	const pending = await getPendingViews(post.id);
 
 	return c.json({ ...post, viewCount: post.viewCount + pending });
