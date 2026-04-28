@@ -3,6 +3,7 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { hash, compare } from "bcrypt";
 import type { Context } from "hono";
+import { getCookie } from "hono/cookie";
 import { prisma } from "../db";
 import { authMiddleware, type JWTPayload } from "../middleware/auth";
 import {
@@ -12,7 +13,6 @@ import {
 	recordLoginSuccess,
 	getClientIp,
 } from "../middleware/rate-limit";
-import { loadUserRolesAndPermissions } from "../lib/user-permissions";
 import { ROLE_KEYS } from "../lib/permissions";
 import {
 	bumpTokenVersion,
@@ -21,6 +21,14 @@ import {
 	issueTokenPair,
 	revokeRefreshToken,
 } from "../lib/tokens";
+import {
+	REFRESH_COOKIE,
+	clearAuthCookies,
+	rotateAccessCookie,
+	rotateCsrfCookie,
+	rotateRefreshCookie,
+	setAuthCookies,
+} from "../lib/cookies";
 
 export const authRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
@@ -63,14 +71,6 @@ const changePasswordSchema = z.object({
 	newPassword: passwordSchema,
 });
 
-const refreshSchema = z.object({
-	refreshToken: z.string().min(1),
-});
-
-const logoutSchema = z.object({
-	refreshToken: z.string().min(1).optional(),
-});
-
 class SetupAlreadyCompletedError extends Error {}
 
 function clientContext(c: Context) {
@@ -79,6 +79,12 @@ function clientContext(c: Context) {
 	const userAgent = c.req.header("user-agent") || null;
 	return { ip, userAgent };
 }
+
+// Pre-computed bcrypt hash of a random string. Used to make /login spend the
+// same wall-time on a missing-user path as on a wrong-password path. Without
+// this, `bcrypt.compare` only runs when the user exists, leaking ~30ms of
+// timing signal that lets attackers enumerate accounts.
+const DUMMY_PASSWORD_HASH = "$2b$10$CwTycUXWue0Thq9StjUM0uJ8cLh5GxqCkB5rIo1NYHSZv1VfM0vBu";
 
 // Public: check if setup wizard should be shown (no users yet)
 authRoutes.get("/setup-status", async (c) => {
@@ -133,11 +139,9 @@ authRoutes.post(
 		}
 
 		const pair = await issueTokenPair({ ...user, mustChangePassword: false }, clientContext(c));
+		setAuthCookies(c, { accessToken: pair.accessToken, refreshToken: pair.refreshToken });
 		return c.json(
 			{
-				accessToken: pair.accessToken,
-				refreshToken: pair.refreshToken,
-				refreshTokenExpiresAt: pair.refreshTokenExpiresAt,
 				user: {
 					id: user.id,
 					email: user.email,
@@ -179,12 +183,9 @@ authRoutes.post(
 		});
 
 		const pair = await issueTokenPair({ ...user, mustChangePassword: false }, clientContext(c));
-
+		setAuthCookies(c, { accessToken: pair.accessToken, refreshToken: pair.refreshToken });
 		return c.json(
 			{
-				accessToken: pair.accessToken,
-				refreshToken: pair.refreshToken,
-				refreshTokenExpiresAt: pair.refreshTokenExpiresAt,
 				user: {
 					id: user.id,
 					email: user.email,
@@ -204,24 +205,23 @@ authRoutes.post("/login", loginRateLimit(), zValidator("json", loginSchema), asy
 	const { email, password } = c.req.valid("json");
 
 	const user = await prisma.user.findUnique({ where: { email } });
-	if (!user) {
-		await recordLoginFailure(email);
-		return c.json({ error: "Invalid credentials" }, 401);
-	}
 
-	const valid = await compare(password, user.passwordHash);
-	if (!valid) {
+	// Always run bcrypt against *something*, even when the user doesn't exist.
+	// This keeps the response time on the missing-user path within the same
+	// distribution as the wrong-password path, blocking timing-based account
+	// enumeration. Bool result on missing-user branch is discarded.
+	const valid = await compare(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+
+	if (!user || !valid) {
 		await recordLoginFailure(email);
 		return c.json({ error: "Invalid credentials" }, 401);
 	}
 
 	await recordLoginSuccess(email);
 	const pair = await issueTokenPair(user, clientContext(c));
+	setAuthCookies(c, { accessToken: pair.accessToken, refreshToken: pair.refreshToken });
 
 	return c.json({
-		accessToken: pair.accessToken,
-		refreshToken: pair.refreshToken,
-		refreshTokenExpiresAt: pair.refreshTokenExpiresAt,
 		user: {
 			id: user.id,
 			email: user.email,
@@ -234,17 +234,24 @@ authRoutes.post("/login", loginRateLimit(), zValidator("json", loginSchema), asy
 	});
 });
 
+// Refresh endpoint: reads refresh token from HttpOnly cookie. No CSRF required
+// because the refresh cookie itself is SameSite=Strict — cross-site requests
+// can't carry it.
 authRoutes.post(
 	"/refresh",
 	ipRateLimit({ keyPrefix: "refresh", limit: 60, windowSeconds: 60 * 15 }),
-	zValidator("json", refreshSchema),
 	async (c) => {
-		const { refreshToken } = c.req.valid("json");
+		const refreshToken = getCookie(c, REFRESH_COOKIE);
+		if (!refreshToken) {
+			return c.json({ error: "Missing refresh token" }, 401);
+		}
 
 		const result = await consumeAndRotateRefreshToken(refreshToken, clientContext(c));
 		if (!result.ok) {
 			// Don't echo the reason — it gives an attacker a signal about whether
-			// they hit a real-but-revoked token vs. a non-existent one.
+			// they hit a real-but-revoked token vs. a non-existent one. Also clear
+			// stale cookies so the client falls back to a clean login.
+			clearAuthCookies(c);
 			return c.json({ error: "Invalid refresh token" }, 401);
 		}
 
@@ -254,11 +261,13 @@ authRoutes.post(
 				id: true,
 				email: true,
 				username: true,
+				name: true,
 				mustChangePassword: true,
 				tokenVersion: true,
 			},
 		});
 		if (!user) {
+			clearAuthCookies(c);
 			return c.json({ error: "User not found" }, 401);
 		}
 
@@ -267,15 +276,28 @@ authRoutes.post(
 		// tokens forward indefinitely.
 		if (user.mustChangePassword) {
 			await revokeRefreshToken(result.newRefreshToken);
+			clearAuthCookies(c);
 			return c.json({ error: "Password change required", code: "PASSWORD_CHANGE_REQUIRED" }, 403);
 		}
 
 		const access = await issueAccessToken(user);
+		rotateAccessCookie(c, access.token);
+		rotateRefreshCookie(c, result.newRefreshToken);
+		// Rotate CSRF too so a stolen CSRF cookie can't outlive the access token
+		// it was paired with. Client's `invalidateCsrfCache` after /refresh
+		// re-reads the new value lazily.
+		rotateCsrfCookie(c);
 
 		return c.json({
-			accessToken: access.token,
-			refreshToken: result.newRefreshToken,
-			refreshTokenExpiresAt: result.newRefreshTokenExpiresAt,
+			user: {
+				id: user.id,
+				email: user.email,
+				name: user.name,
+				username: user.username,
+				roles: access.roles,
+				permissions: access.permissions,
+				mustChangePassword: false,
+			},
 		});
 	},
 );
@@ -283,12 +305,12 @@ authRoutes.post(
 authRoutes.post(
 	"/logout",
 	ipRateLimit({ keyPrefix: "logout", limit: 30, windowSeconds: 60 * 15 }),
-	zValidator("json", logoutSchema),
 	async (c) => {
-		const { refreshToken } = c.req.valid("json");
+		const refreshToken = getCookie(c, REFRESH_COOKIE);
 		if (refreshToken) {
 			await revokeRefreshToken(refreshToken);
 		}
+		clearAuthCookies(c);
 		return c.json({ success: true });
 	},
 );
@@ -296,12 +318,15 @@ authRoutes.post(
 authRoutes.post("/logout-all", authMiddleware, async (c) => {
 	const me = c.get("user");
 	await bumpTokenVersion(me.sub);
+	clearAuthCookies(c);
 	return c.json({ success: true });
 });
 
 authRoutes.get("/me", authMiddleware, async (c) => {
 	const jwtPayload = c.get("user");
 
+	// Single round-trip: pull profile fields and the role→permission graph at
+	// once. Previously this fired two queries back-to-back per /me call.
 	const user = await prisma.user.findUnique({
 		where: { id: jwtPayload.sub },
 		select: {
@@ -313,6 +338,16 @@ authRoutes.get("/me", authMiddleware, async (c) => {
 			avatarUrl: true,
 			plan: true,
 			mustChangePassword: true,
+			roles: {
+				select: {
+					role: {
+						select: {
+							key: true,
+							permissions: { select: { permission: { select: { key: true } } } },
+						},
+					},
+				},
+			},
 		},
 	});
 
@@ -320,9 +355,14 @@ authRoutes.get("/me", authMiddleware, async (c) => {
 		return c.json({ error: "User not found" }, 404);
 	}
 
-	const { roles, permissions } = await loadUserRolesAndPermissions(user.id);
+	const roles = user.roles.map((ur) => ur.role.key);
+	const permSet = new Set<string>();
+	for (const ur of user.roles) {
+		for (const rp of ur.role.permissions) permSet.add(rp.permission.key);
+	}
 
-	return c.json({ ...user, roles, permissions });
+	const { roles: _userRoles, ...profile } = user;
+	return c.json({ ...profile, roles, permissions: Array.from(permSet) });
 });
 
 authRoutes.post(
@@ -349,8 +389,9 @@ authRoutes.post(
 			data: { passwordHash, mustChangePassword: false },
 		});
 
-		// Revoke all existing tokens — force re-login on all devices
+		// Revoke all existing tokens — force re-login on all devices.
 		await bumpTokenVersion(user.id);
+		clearAuthCookies(c);
 
 		return c.json({ success: true });
 	},

@@ -23,10 +23,32 @@ const allowedOrigins = [
 app.use(
 	"*",
 	cors({
+		// Reflect only explicitly allowed origins. Returning null for everything
+		// else means cookies will not be honored cross-origin.
 		origin: (origin) => (allowedOrigins.includes(origin) ? origin : null),
 		credentials: true,
+		allowHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"],
+		allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+		exposeHeaders: [],
+		maxAge: 600,
 	}),
 );
+
+// Baseline security headers. Backend only emits JSON, so CSP here is mostly
+// defense-in-depth: if a misconfigured route ever returned HTML, this CSP would
+// neuter inline scripts. The admin SPA's own CSP is set in its index.html (and
+// should be re-set at the reverse proxy in production for frame-ancestors etc).
+app.use("*", async (c, next) => {
+	await next();
+	c.header("X-Content-Type-Options", "nosniff");
+	c.header("X-Frame-Options", "DENY");
+	c.header("Referrer-Policy", "no-referrer");
+	c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+	c.header(
+		"Content-Security-Policy",
+		["default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"].join("; "),
+	);
+});
 
 app.route("/api/auth", authRoutes);
 app.route("/api/posts", postsRoutes);
