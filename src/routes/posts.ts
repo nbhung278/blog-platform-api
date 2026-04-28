@@ -198,21 +198,27 @@ postsRoutes.get("/feed", async (c) => {
 	return c.json({ items: await withPendingViews(items), nextCursor });
 });
 
-// Public: full-text search across title, tags, and author (name/username)
+// Public: search posts by text query OR filter by category slug
 postsRoutes.get("/search", async (c) => {
 	const q = (c.req.query("q") ?? "").trim();
-	if (!q) return c.json({ items: [], total: 0 });
+	const categorySlug = (c.req.query("category") ?? "").trim();
+
+	if (!q && !categorySlug) return c.json({ items: [], total: 0 });
+
+	const where = categorySlug
+		? { status: "published" as const, categories: { some: { category: { slug: categorySlug } } } }
+		: {
+				status: "published" as const,
+				OR: [
+					{ title: { contains: q, mode: "insensitive" as const } },
+					{ tags: { has: q } },
+					{ user: { name: { contains: q, mode: "insensitive" as const } } },
+					{ user: { username: { contains: q, mode: "insensitive" as const } } },
+				],
+			};
 
 	const result = await prisma.post.findMany({
-		where: {
-			status: "published",
-			OR: [
-				{ title: { contains: q, mode: "insensitive" } },
-				{ tags: { has: q } },
-				{ user: { name: { contains: q, mode: "insensitive" } } },
-				{ user: { username: { contains: q, mode: "insensitive" } } },
-			],
-		},
+		where,
 		orderBy: { publishedAt: "desc" },
 		take: 50,
 		include: {
