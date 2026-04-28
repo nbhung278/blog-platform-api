@@ -16,16 +16,36 @@ model User {
   avatarUrl    String?  @map("avatar_url")
   plan         String   @default("free")
   mustChangePassword Boolean @default(false) @map("must_change_password")
+  tokenVersion Int      @default(0) @map("token_version")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
 
-  posts        Post[]
-  postChunks   PostChunk[]
-  chatSessions ChatSession[]
-  comments     Comment[]
-  roles        UserRole[]
+  posts         Post[]
+  postChunks    PostChunk[]
+  chatSessions  ChatSession[]
+  comments      Comment[]
+  roles         UserRole[]
+  refreshTokens RefreshToken[]
 
   @@map("users")
+}
+
+model RefreshToken {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  tokenHash  String   @unique @map("token_hash")
+  expiresAt  DateTime @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  replacedBy String?  @map("replaced_by") @db.Uuid
+  userAgent  String?  @map("user_agent")
+  ip         String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
 
 model Role {

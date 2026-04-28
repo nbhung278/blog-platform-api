@@ -9,12 +9,15 @@ type Options = {
 	keyExtractor?: (c: Context) => string;
 };
 
-export function rateLimit({ keyPrefix, limit, windowSeconds, keyExtractor }: Options) {
+export function getClientIp(c: Context): string {
+	return (
+		c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "unknown"
+	);
+}
+
+export function ipRateLimit({ keyPrefix, limit, windowSeconds, keyExtractor }: Options) {
 	return createMiddleware(async (c, next) => {
-		const ip =
-			c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-			c.req.header("x-real-ip") ||
-			"unknown";
+		const ip = getClientIp(c);
 		const extra = keyExtractor ? `:${keyExtractor(c)}` : "";
 		const key = `ratelimit:${keyPrefix}:${ip}${extra}`;
 
@@ -33,7 +36,110 @@ export function rateLimit({ keyPrefix, limit, windowSeconds, keyExtractor }: Opt
 	});
 }
 
-export async function clearRateLimit(keyPrefix: string, ip: string, extra?: string) {
-	const key = `ratelimit:${keyPrefix}:${ip}${extra ? `:${extra}` : ""}`;
-	await redis.del(key);
+// ---------------------------------------------------------------------------
+// Login rate limiter — two layers + exponential backoff.
+//
+// Layer 1: per-IP (catch botnets / shared NAT abuse).
+// Layer 2: per-account (catch distributed credential stuffing on one email).
+// On failure, the next allowed attempt window grows exponentially.
+//
+// On successful login, the caller must invoke `recordLoginSuccess` to clear
+// counters so a legitimate user isn't locked out by their own past mistakes.
+// ---------------------------------------------------------------------------
+
+const LOGIN_IP_LIMIT = 20;
+const LOGIN_IP_WINDOW = 60 * 15;
+
+const LOGIN_ACCOUNT_BASE_WINDOW = 60; // seconds
+const LOGIN_ACCOUNT_MAX_WINDOW = 60 * 60; // cap at 1 hour
+const LOGIN_ACCOUNT_FREE_ATTEMPTS = 3; // first N failures don't lock
+const LOGIN_ACCOUNT_MAX_FAILURES = 12; // hard ceiling
+
+function ipKey(ip: string) {
+	return `loginlimit:ip:${ip}`;
+}
+function accountKey(email: string) {
+	return `loginlimit:account:${email.toLowerCase()}`;
+}
+
+type AccountState = {
+	failures: number;
+	lockedUntil: number; // epoch seconds, 0 if not locked
+};
+
+async function readAccountState(email: string): Promise<AccountState> {
+	const raw = await redis.hgetall(accountKey(email));
+	return {
+		failures: parseInt(raw.failures || "0", 10),
+		lockedUntil: parseInt(raw.lockedUntil || "0", 10),
+	};
+}
+
+export function loginRateLimit() {
+	return createMiddleware(async (c, next) => {
+		const ip = getClientIp(c);
+
+		const ipCount = await redis.incr(ipKey(ip));
+		if (ipCount === 1) await redis.expire(ipKey(ip), LOGIN_IP_WINDOW);
+		if (ipCount > LOGIN_IP_LIMIT) {
+			const ttl = await redis.ttl(ipKey(ip));
+			c.header("Retry-After", String(ttl));
+			return c.json({ error: "Too many requests from this IP", retryAfter: ttl }, 429);
+		}
+
+		// Peek at body for account-level limits without consuming the original
+		// request body (zValidator needs to read it again downstream).
+		let email: string | undefined;
+		try {
+			const cloned = c.req.raw.clone();
+			const body = await cloned.json();
+			if (body && typeof body.email === "string") email = body.email;
+		} catch {
+			// Not JSON or empty — let zValidator reject downstream.
+		}
+
+		if (email) {
+			const state = await readAccountState(email);
+			const now = Math.floor(Date.now() / 1000);
+			if (state.lockedUntil > now) {
+				const retryAfter = state.lockedUntil - now;
+				c.header("Retry-After", String(retryAfter));
+				// Return the same shape as a wrong-password 401 to avoid leaking
+				// whether the email exists. Retry-After header is the only signal.
+				return c.json({ error: "Invalid credentials" }, 401);
+			}
+		}
+
+		await next();
+	});
+}
+
+export async function recordLoginFailure(email: string) {
+	const key = accountKey(email);
+
+	// Atomic increment — concurrent failed logins all get counted.
+	const failures = await redis.hincrby(key, "failures", 1);
+
+	let lockedUntil = 0;
+	if (failures > LOGIN_ACCOUNT_FREE_ATTEMPTS) {
+		const overage = Math.min(failures - LOGIN_ACCOUNT_FREE_ATTEMPTS, 10);
+		const window = Math.min(
+			LOGIN_ACCOUNT_BASE_WINDOW * Math.pow(2, overage - 1),
+			LOGIN_ACCOUNT_MAX_WINDOW,
+		);
+		lockedUntil = Math.floor(Date.now() / 1000) + window;
+		await redis.hset(key, { lockedUntil });
+	}
+
+	await redis.expire(key, LOGIN_ACCOUNT_MAX_WINDOW * 2);
+
+	return {
+		failures,
+		lockedUntil,
+		exceededHardCeiling: failures >= LOGIN_ACCOUNT_MAX_FAILURES,
+	};
+}
+
+export async function recordLoginSuccess(email: string) {
+	await redis.del(accountKey(email));
 }

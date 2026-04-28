@@ -1,13 +1,26 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { sign } from "hono/jwt";
 import { hash, compare } from "bcrypt";
+import type { Context } from "hono";
 import { prisma } from "../db";
 import { authMiddleware, type JWTPayload } from "../middleware/auth";
-import { rateLimit } from "../middleware/rate-limit";
+import {
+	loginRateLimit,
+	ipRateLimit,
+	recordLoginFailure,
+	recordLoginSuccess,
+	getClientIp,
+} from "../middleware/rate-limit";
 import { loadUserRolesAndPermissions } from "../lib/user-permissions";
 import { ROLE_KEYS } from "../lib/permissions";
+import {
+	bumpTokenVersion,
+	consumeAndRotateRefreshToken,
+	issueAccessToken,
+	issueTokenPair,
+	revokeRefreshToken,
+} from "../lib/tokens";
 
 export const authRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
@@ -50,25 +63,21 @@ const changePasswordSchema = z.object({
 	newPassword: passwordSchema,
 });
 
-async function issueToken(user: {
-	id: string;
-	email: string;
-	username: string;
-	mustChangePassword: boolean;
-}) {
-	const { roles, permissions } = await loadUserRolesAndPermissions(user.id);
-	return sign(
-		{
-			sub: user.id,
-			email: user.email,
-			username: user.username,
-			roles,
-			permissions,
-			mustChangePassword: user.mustChangePassword,
-			exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
-		},
-		process.env.JWT_SECRET!,
-	);
+const refreshSchema = z.object({
+	refreshToken: z.string().min(1),
+});
+
+const logoutSchema = z.object({
+	refreshToken: z.string().min(1).optional(),
+});
+
+class SetupAlreadyCompletedError extends Error {}
+
+function clientContext(c: Context) {
+	const rawIp = getClientIp(c);
+	const ip = rawIp === "unknown" ? null : rawIp;
+	const userAgent = c.req.header("user-agent") || null;
+	return { ip, userAgent };
 }
 
 // Public: check if setup wizard should be shown (no users yet)
@@ -78,17 +87,11 @@ authRoutes.get("/setup-status", async (c) => {
 });
 
 // Public: bootstrap first super_admin. Only works when DB has zero users.
-// Rate-limited to prevent abuse during the brief window before first user exists.
 authRoutes.post(
 	"/setup",
-	rateLimit({ keyPrefix: "setup", limit: 5, windowSeconds: 60 * 15 }),
+	ipRateLimit({ keyPrefix: "setup", limit: 5, windowSeconds: 60 * 15 }),
 	zValidator("json", setupSchema),
 	async (c) => {
-		const userCount = await prisma.user.count();
-		if (userCount > 0) {
-			return c.json({ error: "Setup already completed" }, 410);
-		}
-
 		const body = c.req.valid("json");
 		const superRole = await prisma.role.findUnique({
 			where: { key: ROLE_KEYS.SUPER_ADMIN },
@@ -98,29 +101,50 @@ authRoutes.post(
 		}
 
 		const passwordHash = await hash(body.password, 10);
-		const user = await prisma.user.create({
-			data: {
-				email: body.email,
-				username: body.username,
-				name: body.name,
-				passwordHash,
-				roles: { create: [{ roleId: superRole.id }] },
-			},
-			select: { id: true, email: true, username: true },
-		});
 
-		const token = await issueToken({ ...user, mustChangePassword: false });
-		const { roles, permissions } = await loadUserRolesAndPermissions(user.id);
+		// Serializable transaction: count + create must be atomic so two
+		// concurrent /setup requests can't both succeed when DB is empty.
+		let user: { id: string; email: string; username: string; tokenVersion: number };
+		try {
+			user = await prisma.$transaction(
+				async (tx) => {
+					const count = await tx.user.count();
+					if (count > 0) {
+						throw new SetupAlreadyCompletedError();
+					}
+					return tx.user.create({
+						data: {
+							email: body.email,
+							username: body.username,
+							name: body.name,
+							passwordHash,
+							roles: { create: [{ roleId: superRole.id }] },
+						},
+						select: { id: true, email: true, username: true, tokenVersion: true },
+					});
+				},
+				{ isolationLevel: "Serializable" },
+			);
+		} catch (err) {
+			if (err instanceof SetupAlreadyCompletedError) {
+				return c.json({ error: "Setup already completed" }, 410);
+			}
+			throw err;
+		}
+
+		const pair = await issueTokenPair({ ...user, mustChangePassword: false }, clientContext(c));
 		return c.json(
 			{
-				token,
+				accessToken: pair.accessToken,
+				refreshToken: pair.refreshToken,
+				refreshTokenExpiresAt: pair.refreshTokenExpiresAt,
 				user: {
 					id: user.id,
 					email: user.email,
 					username: user.username,
 					name: body.name,
-					roles,
-					permissions,
+					roles: pair.roles,
+					permissions: pair.permissions,
 					mustChangePassword: false,
 				},
 			},
@@ -131,7 +155,7 @@ authRoutes.post(
 
 authRoutes.post(
 	"/register",
-	rateLimit({ keyPrefix: "register", limit: 5, windowSeconds: 60 * 15 }),
+	ipRateLimit({ keyPrefix: "register", limit: 5, windowSeconds: 60 * 15 }),
 	zValidator("json", registerSchema),
 	async (c) => {
 		if (process.env.ALLOW_REGISTRATION !== "true") {
@@ -151,49 +175,129 @@ authRoutes.post(
 
 		const user = await prisma.user.create({
 			data: { email, passwordHash, name, username },
-			select: { id: true, email: true, username: true, name: true },
+			select: { id: true, email: true, username: true, name: true, tokenVersion: true },
 		});
 
-		const token = await issueToken({ ...user, mustChangePassword: false });
+		const pair = await issueTokenPair({ ...user, mustChangePassword: false }, clientContext(c));
 
-		return c.json({ token, user }, 201);
+		return c.json(
+			{
+				accessToken: pair.accessToken,
+				refreshToken: pair.refreshToken,
+				refreshTokenExpiresAt: pair.refreshTokenExpiresAt,
+				user: {
+					id: user.id,
+					email: user.email,
+					name: user.name,
+					username: user.username,
+					roles: pair.roles,
+					permissions: pair.permissions,
+					mustChangePassword: false,
+				},
+			},
+			201,
+		);
+	},
+);
+
+authRoutes.post("/login", loginRateLimit(), zValidator("json", loginSchema), async (c) => {
+	const { email, password } = c.req.valid("json");
+
+	const user = await prisma.user.findUnique({ where: { email } });
+	if (!user) {
+		await recordLoginFailure(email);
+		return c.json({ error: "Invalid credentials" }, 401);
+	}
+
+	const valid = await compare(password, user.passwordHash);
+	if (!valid) {
+		await recordLoginFailure(email);
+		return c.json({ error: "Invalid credentials" }, 401);
+	}
+
+	await recordLoginSuccess(email);
+	const pair = await issueTokenPair(user, clientContext(c));
+
+	return c.json({
+		accessToken: pair.accessToken,
+		refreshToken: pair.refreshToken,
+		refreshTokenExpiresAt: pair.refreshTokenExpiresAt,
+		user: {
+			id: user.id,
+			email: user.email,
+			name: user.name,
+			username: user.username,
+			roles: pair.roles,
+			permissions: pair.permissions,
+			mustChangePassword: user.mustChangePassword,
+		},
+	});
+});
+
+authRoutes.post(
+	"/refresh",
+	ipRateLimit({ keyPrefix: "refresh", limit: 60, windowSeconds: 60 * 15 }),
+	zValidator("json", refreshSchema),
+	async (c) => {
+		const { refreshToken } = c.req.valid("json");
+
+		const result = await consumeAndRotateRefreshToken(refreshToken, clientContext(c));
+		if (!result.ok) {
+			// Don't echo the reason — it gives an attacker a signal about whether
+			// they hit a real-but-revoked token vs. a non-existent one.
+			return c.json({ error: "Invalid refresh token" }, 401);
+		}
+
+		const user = await prisma.user.findUnique({
+			where: { id: result.userId },
+			select: {
+				id: true,
+				email: true,
+				username: true,
+				mustChangePassword: true,
+				tokenVersion: true,
+			},
+		});
+		if (!user) {
+			return c.json({ error: "User not found" }, 401);
+		}
+
+		// User was flagged for forced password change — make /refresh reject too,
+		// not just protected routes. Otherwise client could keep sliding access
+		// tokens forward indefinitely.
+		if (user.mustChangePassword) {
+			await revokeRefreshToken(result.newRefreshToken);
+			return c.json({ error: "Password change required", code: "PASSWORD_CHANGE_REQUIRED" }, 403);
+		}
+
+		const access = await issueAccessToken(user);
+
+		return c.json({
+			accessToken: access.token,
+			refreshToken: result.newRefreshToken,
+			refreshTokenExpiresAt: result.newRefreshTokenExpiresAt,
+		});
 	},
 );
 
 authRoutes.post(
-	"/login",
-	rateLimit({ keyPrefix: "login", limit: 10, windowSeconds: 60 * 15 }),
-	zValidator("json", loginSchema),
+	"/logout",
+	ipRateLimit({ keyPrefix: "logout", limit: 30, windowSeconds: 60 * 15 }),
+	zValidator("json", logoutSchema),
 	async (c) => {
-		const { email, password } = c.req.valid("json");
-
-		const user = await prisma.user.findUnique({ where: { email } });
-		if (!user) {
-			return c.json({ error: "Invalid credentials" }, 401);
+		const { refreshToken } = c.req.valid("json");
+		if (refreshToken) {
+			await revokeRefreshToken(refreshToken);
 		}
-
-		const valid = await compare(password, user.passwordHash);
-		if (!valid) {
-			return c.json({ error: "Invalid credentials" }, 401);
-		}
-
-		const token = await issueToken(user);
-		const { roles, permissions } = await loadUserRolesAndPermissions(user.id);
-
-		return c.json({
-			token,
-			user: {
-				id: user.id,
-				email: user.email,
-				name: user.name,
-				username: user.username,
-				roles,
-				permissions,
-				mustChangePassword: user.mustChangePassword,
-			},
-		});
+		return c.json({ success: true });
 	},
 );
+
+authRoutes.post("/logout-all", authMiddleware, async (c) => {
+	const me = c.get("user");
+	await bumpTokenVersion(me.sub);
+	return c.json({ success: true });
+});
 
 authRoutes.get("/me", authMiddleware, async (c) => {
 	const jwtPayload = c.get("user");
@@ -244,6 +348,9 @@ authRoutes.post(
 			where: { id: user.id },
 			data: { passwordHash, mustChangePassword: false },
 		});
+
+		// Revoke all existing tokens — force re-login on all devices
+		await bumpTokenVersion(user.id);
 
 		return c.json({ success: true });
 	},

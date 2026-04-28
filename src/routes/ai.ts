@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware } from "../middleware/auth";
 import { semanticSearch, assembleContext } from "../rag";
@@ -29,7 +30,7 @@ aiRoutes.post("/chat", authMiddleware, zValidator("json", chatSchema), async (c)
 		});
 
 		if (session) {
-			history = (session.messages as Message[]).slice(-20);
+			history = (session.messages as unknown as Message[]).slice(-20);
 		}
 	}
 
@@ -67,11 +68,11 @@ ${context}
 		if (currentSessionId) {
 			await prisma.chatSession.update({
 				where: { id: currentSessionId, userId: user.sub },
-				data: { messages: newHistory },
+				data: { messages: newHistory as unknown as Prisma.InputJsonValue },
 			});
 		} else {
 			const session = await prisma.chatSession.create({
-				data: { userId: user.sub, messages: newHistory },
+				data: { userId: user.sub, messages: newHistory as unknown as Prisma.InputJsonValue },
 			});
 			currentSessionId = session.id;
 		}

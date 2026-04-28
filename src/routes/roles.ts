@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
+import { bumpTokenVersion } from "../lib/tokens";
 
 export const rolesRoutes = new Hono();
 
@@ -104,6 +105,16 @@ rolesRoutes.patch("/:id", zValidator("json", upsertRoleSchema.partial()), async 
 			}
 		}
 	});
+
+	// Permission set of a role changed — bump tokens for every user holding it
+	// so their cached permissions in JWT get refreshed on next request.
+	if (body.permissionKeys) {
+		const affected = await prisma.userRole.findMany({
+			where: { roleId: id },
+			select: { userId: true },
+		});
+		await Promise.all(affected.map((u) => bumpTokenVersion(u.userId)));
+	}
 
 	return c.json({ success: true });
 });

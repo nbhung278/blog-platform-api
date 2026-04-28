@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import { verify } from "hono/jwt";
 import type { PermissionKey } from "../lib/permissions";
+import { getCachedTokenVersion } from "../lib/tokens";
 
 export type JWTPayload = {
 	sub: string;
@@ -9,6 +10,7 @@ export type JWTPayload = {
 	roles: string[];
 	permissions: PermissionKey[];
 	mustChangePassword: boolean;
+	tokenVersion: number;
 	exp: number;
 };
 
@@ -16,6 +18,7 @@ const PASSWORD_CHANGE_EXEMPT_PATHS = new Set([
 	"/api/auth/me",
 	"/api/auth/change-password",
 	"/api/auth/logout",
+	"/api/auth/logout-all",
 ]);
 
 export const authMiddleware = createMiddleware<{
@@ -37,6 +40,15 @@ export const authMiddleware = createMiddleware<{
 		// Forces clients to re-login to get a token with roles/permissions.
 		if (!Array.isArray(payload.permissions) || !Array.isArray(payload.roles)) {
 			return c.json({ error: "Token outdated, please log in again" }, 401);
+		}
+
+		if (typeof payload.tokenVersion !== "number") {
+			return c.json({ error: "Token outdated, please log in again" }, 401);
+		}
+
+		const currentVersion = await getCachedTokenVersion(payload.sub);
+		if (currentVersion === null || payload.tokenVersion !== currentVersion) {
+			return c.json({ error: "Token revoked", code: "TOKEN_REVOKED" }, 401);
 		}
 
 		if (payload.mustChangePassword && !PASSWORD_CHANGE_EXEMPT_PATHS.has(c.req.path)) {

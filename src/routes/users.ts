@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission, type JWTPayload } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
+import { bumpTokenVersion } from "../lib/tokens";
 
 export const usersRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
@@ -107,6 +108,9 @@ usersRoutes.patch("/:id", zValidator("json", updateUserSchema), async (c) => {
 		data.mustChangePassword = true;
 	}
 
+	const rolesChanged = !!body.roleIds;
+	const passwordChanged = !!body.password;
+
 	await prisma.$transaction(async (tx) => {
 		if (Object.keys(data).length > 0) {
 			await tx.user.update({ where: { id }, data });
@@ -120,6 +124,12 @@ usersRoutes.patch("/:id", zValidator("json", updateUserSchema), async (c) => {
 			}
 		}
 	});
+
+	// Force re-login if roles or password changed — JWT carries cached
+	// permissions, so bumping the version invalidates outstanding tokens.
+	if (rolesChanged || passwordChanged) {
+		await bumpTokenVersion(id);
+	}
 
 	return c.json({ success: true });
 });
