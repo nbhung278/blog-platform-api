@@ -1,10 +1,9 @@
 import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { verify } from "hono/jwt";
-import { getCookie } from "hono/cookie";
 import type { PermissionKey } from "../lib/permissions";
 import { getCachedTokenVersion } from "../lib/tokens";
-import { ACCESS_COOKIE, CSRF_COOKIE, CSRF_HEADER, csrfTokensMatch } from "../lib/cookies";
+import { CSRF_HEADER, csrfTokensMatch, getAccessCookie, getCsrfCookie } from "../lib/cookies";
 
 export type JWTPayload = {
 	sub: string;
@@ -27,7 +26,7 @@ const PASSWORD_CHANGE_EXEMPT_PATHS = new Set([
 const CSRF_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 function extractAccessToken(c: Context): string | null {
-	const cookieToken = getCookie(c, ACCESS_COOKIE);
+	const cookieToken = getAccessCookie(c);
 	if (cookieToken) return cookieToken;
 	const authHeader = c.req.header("Authorization");
 	if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
@@ -49,10 +48,10 @@ export const authMiddleware = createMiddleware<{
 	// cookies automatically, so a cookie in the request is the signal that the
 	// origin we care about (XHR/fetch from the SPA) is in play. Pure header-
 	// only clients (mobile / CLI) won't carry the cookie and are exempt.
-	const cameFromCookie = !!getCookie(c, ACCESS_COOKIE);
+	const cameFromCookie = !!getAccessCookie(c);
 	if (cameFromCookie && !CSRF_SAFE_METHODS.has(c.req.method)) {
 		const headerToken = c.req.header(CSRF_HEADER);
-		const cookieToken = getCookie(c, CSRF_COOKIE);
+		const cookieToken = getCsrfCookie(c);
 		if (!csrfTokensMatch(headerToken, cookieToken)) {
 			return c.json({ error: "CSRF token missing or invalid" }, 403);
 		}
@@ -86,6 +85,24 @@ export const authMiddleware = createMiddleware<{
 		return c.json({ error: "Invalid token" }, 401);
 	}
 });
+
+// Best-effort auth: returns the JWT payload if a valid token is present,
+// null otherwise. Public endpoints can use this to enrich responses for
+// signed-in viewers (e.g. show own pending posts on profile).
+export async function tryGetUser(c: Context): Promise<JWTPayload | null> {
+	const token = extractAccessToken(c);
+	if (!token) return null;
+	try {
+		const payload = (await verify(token, process.env.JWT_SECRET!, "HS256")) as JWTPayload;
+		if (!Array.isArray(payload.permissions) || !Array.isArray(payload.roles)) return null;
+		if (typeof payload.tokenVersion !== "number") return null;
+		const currentVersion = await getCachedTokenVersion(payload.sub);
+		if (currentVersion === null || payload.tokenVersion !== currentVersion) return null;
+		return payload;
+	} catch {
+		return null;
+	}
+}
 
 export function requirePermission(...required: PermissionKey[]) {
 	return createMiddleware<{ Variables: { user: JWTPayload } }>(async (c, next) => {

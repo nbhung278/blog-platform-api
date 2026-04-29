@@ -2,10 +2,11 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { prisma } from "../db";
-import { authMiddleware, requireAnyPermission } from "../middleware/auth";
+import { authMiddleware, requireAnyPermission, tryGetUser } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { enqueuePostIndexing } from "../queue";
 import { incrementView, getPendingViews, getPendingViewsMap } from "../lib/view-counter";
+import { notifyFollowersOfPost } from "../lib/notifications";
 
 export const postsRoutes = new Hono();
 
@@ -281,16 +282,29 @@ postsRoutes.get("/:slug", async (c) => {
 	return c.json({ ...post, viewCount: post.viewCount + pending });
 });
 
-// Public: list posts by username
+// Public: list posts by username. The author themself sees own
+// drafts/pending/rejected as well, so they can manage in-flight work
+// from their profile page.
 postsRoutes.get("/public/:username", async (c) => {
 	const username = c.req.param("username");
+	const viewer = await tryGetUser(c);
+
+	const author = await prisma.user.findUnique({
+		where: { username },
+		select: { id: true },
+	});
+	if (!author) return c.json([]);
+
+	const isOwner = viewer?.sub === author.id;
 
 	const result = await prisma.post.findMany({
 		where: {
-			status: "published",
 			user: { username },
+			...(isOwner
+				? { status: { in: ["draft", "pending", "published", "rejected"] } }
+				: { status: "published" }),
 		},
-		orderBy: { publishedAt: "desc" },
+		orderBy: [{ publishedAt: "desc" }, { updatedAt: "desc" }],
 		include: {
 			user: {
 				select: { name: true, username: true, avatarUrl: true },
@@ -346,6 +360,10 @@ postsRoutes.post(
 
 		await enqueuePostIndexing(post.id, user.sub);
 
+		if (post.status === "published") {
+			await notifyFollowersOfPost(user.sub, post.id, "post_published");
+		}
+
 		return c.json(post, 201);
 	},
 );
@@ -385,8 +403,15 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 	const { version, categoryIds, ...updates } = body;
 	const readingTime = updates.contentMd ? calcReadingTime(updates.contentMd) : undefined;
 	// Set publishedAt when transitioning to published for the first time.
-	const publishedAt =
-		updates.status === "published" && existing.status !== "published" ? new Date() : undefined;
+	const isFirstPublish = updates.status === "published" && existing.status !== "published";
+	const publishedAt = isFirstPublish ? new Date() : undefined;
+
+	// Followers care about meaningful content changes — title or body. Tag
+	// edits, cover swaps, etc. shouldn't fan-out notifications.
+	const isPublishedEdit =
+		existing.status === "published" &&
+		(updates.status === undefined || updates.status === "published") &&
+		(updates.title !== undefined || updates.contentMd !== undefined);
 
 	const updated = await prisma.post.update({
 		where: { id: postId },
@@ -409,6 +434,12 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 
 	if (updates.contentMd) {
 		await enqueuePostIndexing(postId, existing.userId);
+	}
+
+	if (isFirstPublish) {
+		await notifyFollowersOfPost(existing.userId, postId, "post_published");
+	} else if (isPublishedEdit) {
+		await notifyFollowersOfPost(existing.userId, postId, "post_updated");
 	}
 
 	return c.json(updated);

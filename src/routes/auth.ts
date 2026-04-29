@@ -3,9 +3,9 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { hash, compare } from "bcrypt";
 import type { Context } from "hono";
-import { getCookie } from "hono/cookie";
 import { prisma } from "../db";
-import { authMiddleware, type JWTPayload } from "../middleware/auth";
+import { authMiddleware, tryGetUser, type JWTPayload } from "../middleware/auth";
+import { disconnectUser } from "../lib/realtime";
 import {
 	loginRateLimit,
 	ipRateLimit,
@@ -22,8 +22,8 @@ import {
 	revokeRefreshToken,
 } from "../lib/tokens";
 import {
-	REFRESH_COOKIE,
 	clearAuthCookies,
+	getRefreshCookie,
 	rotateAccessCookie,
 	rotateCsrfCookie,
 	rotateRefreshCookie,
@@ -177,8 +177,22 @@ authRoutes.post(
 
 		const passwordHash = await hash(password, 10);
 
+		const authorRole = await prisma.role.findUnique({
+			where: { key: ROLE_KEYS.AUTHOR },
+			select: { id: true },
+		});
+		if (!authorRole) {
+			return c.json({ error: "author role missing — run db:seed first" }, 500);
+		}
+
 		const user = await prisma.user.create({
-			data: { email, passwordHash, name, username },
+			data: {
+				email,
+				passwordHash,
+				name,
+				username,
+				roles: { create: [{ roleId: authorRole.id }] },
+			},
 			select: { id: true, email: true, username: true, name: true, tokenVersion: true },
 		});
 
@@ -241,7 +255,7 @@ authRoutes.post(
 	"/refresh",
 	ipRateLimit({ keyPrefix: "refresh", limit: 60, windowSeconds: 60 * 15 }),
 	async (c) => {
-		const refreshToken = getCookie(c, REFRESH_COOKIE);
+		const refreshToken = getRefreshCookie(c);
 		if (!refreshToken) {
 			return c.json({ error: "Missing refresh token" }, 401);
 		}
@@ -306,11 +320,13 @@ authRoutes.post(
 	"/logout",
 	ipRateLimit({ keyPrefix: "logout", limit: 30, windowSeconds: 60 * 15 }),
 	async (c) => {
-		const refreshToken = getCookie(c, REFRESH_COOKIE);
+		const refreshToken = getRefreshCookie(c);
+		const me = await tryGetUser(c);
 		if (refreshToken) {
 			await revokeRefreshToken(refreshToken);
 		}
 		clearAuthCookies(c);
+		if (me) disconnectUser(me.sub, "logged out");
 		return c.json({ success: true });
 	},
 );
@@ -319,6 +335,7 @@ authRoutes.post("/logout-all", authMiddleware, async (c) => {
 	const me = c.get("user");
 	await bumpTokenVersion(me.sub);
 	clearAuthCookies(c);
+	disconnectUser(me.sub, "logged out from all devices");
 	return c.json({ success: true });
 });
 
@@ -392,6 +409,7 @@ authRoutes.post(
 		// Revoke all existing tokens — force re-login on all devices.
 		await bumpTokenVersion(user.id);
 		clearAuthCookies(c);
+		disconnectUser(user.id, "password changed");
 
 		return c.json({ success: true });
 	},

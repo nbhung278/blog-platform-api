@@ -1,7 +1,14 @@
 node_modules/
 dist/
+build/
 .env
 .env.local
+.env.*.local
 *.log
 .DS_Store
+.idea/
+.vscode/
+coverage/
+# Note: bun.lock (text format) is committed for reproducible installs.
+# Old binary lockfile is ignored:
 bun.lockb

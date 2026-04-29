@@ -71,6 +71,10 @@ export const DEFAULT_ROLES: Array<{
 		key: ROLE_KEYS.AUTHOR,
 		name: "Author",
 		description: "Write and manage own posts",
-		permissions: [PERMISSIONS.POST_WRITE_OWN, PERMISSIONS.POST_DELETE_OWN],
+		permissions: [
+			PERMISSIONS.POST_WRITE_OWN,
+			PERMISSIONS.POST_DELETE_OWN,
+			PERMISSIONS.MEDIA_UPLOAD,
+		],
 	},
 ];

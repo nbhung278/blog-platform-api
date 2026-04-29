@@ -1,0 +1,64 @@
+import type { ServerWebSocket } from "bun";
+
+type WSData = { userId: string };
+type WS = ServerWebSocket<WSData>;
+
+export type RealtimeMessage =
+	| { kind: "notification"; data: unknown }
+	| { kind: "unread_count"; count: number };
+
+const subscribers = new Map<string, Set<WS>>();
+
+// Cap concurrent sockets per user. A real client only needs one (multiple
+// tabs share via SharedWorker is the future), so 8 is plenty of headroom for
+// duplicate tabs while preventing a logged-in attacker from exhausting memory
+// by opening thousands of sockets.
+const MAX_SOCKETS_PER_USER = 8;
+
+export function addSubscriber(userId: string, ws: WS): boolean {
+	let set = subscribers.get(userId);
+	if (!set) {
+		set = new Set();
+		subscribers.set(userId, set);
+	}
+	if (set.size >= MAX_SOCKETS_PER_USER) {
+		return false;
+	}
+	set.add(ws);
+	return true;
+}
+
+export function removeSubscriber(userId: string, ws: WS) {
+	const set = subscribers.get(userId);
+	if (!set) return;
+	set.delete(ws);
+	if (set.size === 0) subscribers.delete(userId);
+}
+
+export function publishToUser(userId: string, message: RealtimeMessage) {
+	const set = subscribers.get(userId);
+	if (!set) return;
+	const payload = JSON.stringify(message);
+	for (const ws of set) {
+		try {
+			ws.send(payload);
+		} catch {
+			// Ignore — client likely disconnected; the close handler will clean up.
+		}
+	}
+}
+
+// Forcefully close all sockets for a user. Called when the user logs out or
+// their tokenVersion is bumped, so existing sockets can't outlive the session.
+export function disconnectUser(userId: string, reason = "session ended") {
+	const set = subscribers.get(userId);
+	if (!set) return;
+	for (const ws of set) {
+		try {
+			ws.close(4001, reason);
+		} catch {
+			// Ignore.
+		}
+	}
+	subscribers.delete(userId);
+}

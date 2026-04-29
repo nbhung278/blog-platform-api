@@ -9,8 +9,11 @@ import { analyticsRoutes } from "./routes/analytics";
 import { usersRoutes } from "./routes/users";
 import { rolesRoutes } from "./routes/roles";
 import { uploadsRoutes } from "./routes/uploads";
+import { followsRoutes } from "./routes/follows";
+import { notificationsRoutes } from "./routes/notifications";
 import { startWorkers } from "./queue";
 import { startViewCountFlusher } from "./lib/view-counter";
+import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
 
 const app = new Hono();
 
@@ -27,7 +30,7 @@ app.use(
 		// else means cookies will not be honored cross-origin.
 		origin: (origin) => (allowedOrigins.includes(origin) ? origin : null),
 		credentials: true,
-		allowHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"],
+		allowHeaders: ["Content-Type", "Authorization", "X-CSRF-Token", "X-App-Client"],
 		allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
 		exposeHeaders: [],
 		maxAge: 600,
@@ -58,6 +61,8 @@ app.route("/api/analytics", analyticsRoutes);
 app.route("/api/users", usersRoutes);
 app.route("/api/roles", rolesRoutes);
 app.route("/api/uploads", uploadsRoutes);
+app.route("/api/follows", followsRoutes);
+app.route("/api/notifications", notificationsRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 
@@ -68,7 +73,33 @@ startViewCountFlusher();
 const port = Number(process.env.PORT) || 3000;
 console.log(`[server] Starting on port ${port}`);
 
-export default {
+const server = Bun.serve<WSData, never>({
 	port,
-	fetch: app.fetch,
-};
+	async fetch(req, server) {
+		const url = new URL(req.url);
+		// WebSocket upgrade handshake — auth via the access cookie before promoting
+		// the connection. Origin is also enforced so only our SPAs can open sockets.
+		if (url.pathname === "/ws") {
+			// Strict origin allowlist on WebSocket upgrades. Browsers always set
+			// Origin on WS handshakes; a missing/null Origin almost always means
+			// a non-browser client and we don't grant those a socket.
+			const origin = req.headers.get("origin");
+			if (!origin || !allowedOrigins.includes(origin)) {
+				return new Response("Forbidden", { status: 403 });
+			}
+			const userId = await authenticateUpgradeRequest(req);
+			if (!userId) {
+				return new Response("Unauthorized", { status: 401 });
+			}
+			const ok = server.upgrade(req, { data: { userId } });
+			if (ok) return undefined;
+			return new Response("Upgrade failed", { status: 500 });
+		}
+		return app.fetch(req);
+	},
+	websocket: wsHandlers,
+});
+
+console.log(`[server] Listening on http://localhost:${server.port}`);
+
+export default server;
