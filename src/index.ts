@@ -11,6 +11,9 @@ import { rolesRoutes } from "./routes/roles";
 import { uploadsRoutes } from "./routes/uploads";
 import { followsRoutes } from "./routes/follows";
 import { notificationsRoutes } from "./routes/notifications";
+import { clapsRoutes } from "./routes/claps";
+import { bookmarksRoutes } from "./routes/bookmarks";
+import { commentsRoutes } from "./routes/comments";
 import { startWorkers } from "./queue";
 import { startViewCountFlusher } from "./lib/view-counter";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
@@ -63,6 +66,9 @@ app.route("/api/roles", rolesRoutes);
 app.route("/api/uploads", uploadsRoutes);
 app.route("/api/follows", followsRoutes);
 app.route("/api/notifications", notificationsRoutes);
+app.route("/api/claps", clapsRoutes);
+app.route("/api/bookmarks", bookmarksRoutes);
+app.route("/api/comments", commentsRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 

@@ -30,6 +30,9 @@ model User {
   following              Follow[]       @relation("UserFollowing")
   notifications          Notification[] @relation("NotificationRecipient")
   triggeredNotifications Notification[] @relation("NotificationActor")
+  postClaps              PostClap[]
+  postBookmarks          PostBookmark[]
+  commentClaps           CommentClap[]
 
   @@map("users")
 }
@@ -144,7 +147,7 @@ model Post {
   publishedAt DateTime? @map("published_at")
   readingTime Int       @default(0) @map("reading_time")
   viewCount   Int       @default(0) @map("view_count")
-  likeCount   Int       @default(0) @map("like_count")
+  clapCount   Int       @default(0) @map("clap_count")
   tags        String[]  @default([])
   metaTitle   String?   @map("meta_title")
   metaDesc    String?   @map("meta_desc")
@@ -158,12 +161,44 @@ model Post {
   comments        Comment[]
   categories      PostCategory[]
   notifications   Notification[]
+  claps           PostClap[]
+  bookmarks       PostBookmark[]
 
   @@unique([userId, slug])
   @@index([status])
   @@index([publishedAt(sort: Desc)])
   @@index([userId])
   @@map("posts")
+}
+
+model PostClap {
+  userId    String   @map("user_id") @db.Uuid
+  postId    String   @map("post_id") @db.Uuid
+  // Per-user clap count for this post. Capped at MAX_CLAPS_PER_USER server-side.
+  count     Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([userId, postId])
+  @@index([postId])
+  @@map("post_claps")
+}
+
+model PostBookmark {
+  userId    String   @map("user_id") @db.Uuid
+  postId    String   @map("post_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([userId, postId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([postId])
+  @@map("post_bookmarks")
 }
 
 model PostChunk {
@@ -216,12 +251,35 @@ model Comment {
   parentId  String?  @map("parent_id") @db.Uuid
   guestName String?  @map("guest_name")
   content   String
+  isDeleted Boolean  @default(false) @map("is_deleted")
+  clapCount Int      @default(0) @map("clap_count")
   createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
-  post Post  @relation(fields: [postId], references: [id], onDelete: Cascade)
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  post    Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user    User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  parent  Comment?      @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[]     @relation("CommentReplies")
+  claps   CommentClap[]
 
+  @@index([postId, createdAt(sort: Desc)])
+  @@index([parentId])
   @@map("comments")
+}
+
+model CommentClap {
+  userId    String   @map("user_id") @db.Uuid
+  commentId String   @map("comment_id") @db.Uuid
+  count     Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@id([userId, commentId])
+  @@index([commentId])
+  @@map("comment_claps")
 }
 
 model Follow {
@@ -244,6 +302,7 @@ model Notification {
   actorId   String?  @map("actor_id") @db.Uuid
   type      String
   postId    String?  @map("post_id") @db.Uuid
+  commentId String?  @map("comment_id") @db.Uuid
   isRead    Boolean  @default(false) @map("is_read")
   createdAt DateTime @default(now()) @map("created_at")
 

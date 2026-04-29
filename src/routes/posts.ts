@@ -128,7 +128,7 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 				publishedAt: true,
 				readingTime: true,
 				viewCount: true,
-				likeCount: true,
+				clapCount: true,
 				tags: true,
 				version: true,
 				createdAt: true,

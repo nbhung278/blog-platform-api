@@ -1,22 +1,27 @@
 import { prisma } from "../db";
 import { publishToUser } from "./realtime";
 
-export type NotificationType = "follow" | "post_published" | "post_updated";
+export type NotificationType = "follow" | "post_published" | "post_updated" | "comment_reply";
 
 export interface CreateNotificationInput {
 	userId: string;
 	actorId?: string;
 	type: NotificationType;
 	postId?: string;
+	commentId?: string;
 }
 
 export async function createNotification(input: CreateNotificationInput) {
+	// Don't notify yourself for actions you triggered.
+	if (input.actorId && input.actorId === input.userId) return null;
+
 	const notif = await prisma.notification.create({
 		data: {
 			userId: input.userId,
 			actorId: input.actorId,
 			type: input.type,
 			postId: input.postId,
+			commentId: input.commentId,
 		},
 		include: {
 			actor: { select: { id: true, name: true, username: true, avatarUrl: true } },
@@ -69,6 +74,7 @@ export async function fanoutNotification(
 					actorId: input.actorId,
 					type: input.type,
 					postId: input.postId,
+					commentId: input.commentId,
 				},
 				include: {
 					actor: { select: { id: true, name: true, username: true, avatarUrl: true } },
