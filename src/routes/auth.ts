@@ -80,7 +80,6 @@ function clientContext(c: Context) {
 	return { ip, userAgent };
 }
 
-//adad
 // Pre-computed bcrypt hash of a random string. Used to make /login spend the
 // same wall-time on a missing-user path as on a wrong-password path. Without
 // this, `bcrypt.compare` only runs when the user exists, leaking ~30ms of
