@@ -80,6 +80,7 @@ function clientContext(c: Context) {
 	return { ip, userAgent };
 }
 
+//adad
 // Pre-computed bcrypt hash of a random string. Used to make /login spend the
 // same wall-time on a missing-user path as on a wrong-password path. Without
 // this, `bcrypt.compare` only runs when the user exists, leaking ~30ms of
@@ -159,7 +160,7 @@ authRoutes.post(
 
 authRoutes.post(
 	"/register",
-	ipRateLimit({ keyPrefix: "register", limit: 5, windowSeconds: 60 * 15 }),
+	ipRateLimit({ keyPrefix: "register", limit: 20, windowSeconds: 60 * 15 }),
 	zValidator("json", registerSchema),
 	async (c) => {
 		if (process.env.ALLOW_REGISTRATION !== "true") {
@@ -193,7 +194,15 @@ authRoutes.post(
 				username,
 				roles: { create: [{ roleId: authorRole.id }] },
 			},
-			select: { id: true, email: true, username: true, name: true, tokenVersion: true },
+			select: {
+				id: true,
+				email: true,
+				username: true,
+				name: true,
+				bio: true,
+				avatarUrl: true,
+				tokenVersion: true,
+			},
 		});
 
 		const pair = await issueTokenPair({ ...user, mustChangePassword: false }, clientContext(c));
@@ -205,6 +214,8 @@ authRoutes.post(
 					email: user.email,
 					name: user.name,
 					username: user.username,
+					bio: user.bio,
+					avatarUrl: user.avatarUrl,
 					roles: pair.roles,
 					permissions: pair.permissions,
 					mustChangePassword: false,
@@ -241,6 +252,8 @@ authRoutes.post("/login", loginRateLimit(), zValidator("json", loginSchema), asy
 			email: user.email,
 			name: user.name,
 			username: user.username,
+			bio: user.bio,
+			avatarUrl: user.avatarUrl,
 			roles: pair.roles,
 			permissions: pair.permissions,
 			mustChangePassword: user.mustChangePassword,
@@ -380,6 +393,34 @@ authRoutes.get("/me", authMiddleware, async (c) => {
 
 	const { roles: _userRoles, ...profile } = user;
 	return c.json({ ...profile, roles, permissions: Array.from(permSet) });
+});
+
+const updateMeSchema = z.object({
+	name: z.string().min(1).max(100).optional(),
+	bio: z.string().max(500).nullable().optional(),
+	avatarUrl: z.string().url().nullable().optional(),
+});
+
+authRoutes.patch("/me", authMiddleware, zValidator("json", updateMeSchema), async (c) => {
+	const me = c.get("user");
+	const body = c.req.valid("json");
+
+	const data: Record<string, unknown> = {};
+	if (body.name !== undefined) data.name = body.name;
+	if ("bio" in body) data.bio = body.bio;
+	if ("avatarUrl" in body) data.avatarUrl = body.avatarUrl;
+
+	if (Object.keys(data).length === 0) {
+		return c.json({ error: "Nothing to update" }, 400);
+	}
+
+	const user = await prisma.user.update({
+		where: { id: me.sub },
+		data,
+		select: { id: true, email: true, name: true, username: true, bio: true, avatarUrl: true },
+	});
+
+	return c.json(user);
 });
 
 authRoutes.post(

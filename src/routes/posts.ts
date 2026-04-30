@@ -105,6 +105,7 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 	const wantAll = scope === "all" && canSeeAll;
 
 	const where = {
+		deletedAt: null,
 		...(wantAll ? {} : { userId: user.sub }),
 		...(statusFilter && POST_STATUSES.includes(statusFilter) ? { status: statusFilter } : {}),
 		...(categoryId ? { categories: { some: { categoryId } } } : {}),
@@ -156,7 +157,7 @@ postsRoutes.post(
 
 		// Fetch all posts to check ownership
 		const posts = await prisma.post.findMany({
-			where: { id: { in: ids } },
+			where: { id: { in: ids }, deletedAt: null },
 			select: { id: true, userId: true },
 		});
 
@@ -171,8 +172,12 @@ postsRoutes.post(
 			}
 		}
 
-		await prisma.post.deleteMany({ where: { id: { in: ids } } });
-		return c.json({ deleted: ids.length });
+		const now = new Date();
+		await prisma.post.updateMany({
+			where: { id: { in: posts.map((p) => p.id) } },
+			data: { deletedAt: now },
+		});
+		return c.json({ deleted: posts.length });
 	},
 );
 
@@ -182,7 +187,7 @@ postsRoutes.get("/feed", async (c) => {
 	const cursor = c.req.query("cursor");
 
 	const result = await prisma.post.findMany({
-		where: { status: "published" },
+		where: { status: "published", deletedAt: null },
 		orderBy: [{ publishedAt: "desc" }, { id: "desc" }],
 		take: limit + 1,
 		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -207,9 +212,14 @@ postsRoutes.get("/search", async (c) => {
 	if (!q && !categorySlug) return c.json({ items: [], total: 0 });
 
 	const where = categorySlug
-		? { status: "published" as const, categories: { some: { category: { slug: categorySlug } } } }
+		? {
+				status: "published" as const,
+				deletedAt: null,
+				categories: { some: { category: { slug: categorySlug } } },
+			}
 		: {
 				status: "published" as const,
+				deletedAt: null,
 				OR: [
 					{ title: { contains: q, mode: "insensitive" as const } },
 					{ tags: { has: q } },
@@ -246,7 +256,7 @@ postsRoutes.get("/id/:id", authMiddleware, async (c) => {
 		},
 	});
 
-	if (!post) {
+	if (!post || post.deletedAt) {
 		return c.json({ error: "Post not found" }, 404);
 	}
 
@@ -268,7 +278,7 @@ postsRoutes.get("/:slug", async (c) => {
 	const slug = c.req.param("slug");
 
 	const post = await prisma.post.findFirst({
-		where: { slug, status: "published" },
+		where: { slug, status: "published", deletedAt: null },
 	});
 
 	if (!post) {
@@ -300,6 +310,7 @@ postsRoutes.get("/public/:username", async (c) => {
 	const result = await prisma.post.findMany({
 		where: {
 			user: { username },
+			deletedAt: null,
 			...(isOwner
 				? { status: { in: ["draft", "pending", "published", "rejected"] } }
 				: { status: "published" }),
@@ -376,10 +387,10 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 
 	const existing = await prisma.post.findUnique({
 		where: { id: postId },
-		select: { version: true, userId: true, status: true, publishedAt: true },
+		select: { version: true, userId: true, status: true, publishedAt: true, deletedAt: true },
 	});
 
-	if (!existing) {
+	if (!existing || existing.deletedAt) {
 		return c.json({ error: "Post not found" }, 404);
 	}
 
@@ -452,10 +463,10 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 
 	const existing = await prisma.post.findUnique({
 		where: { id: postId },
-		select: { userId: true },
+		select: { userId: true, deletedAt: true },
 	});
 
-	if (!existing) {
+	if (!existing || existing.deletedAt) {
 		return c.json({ error: "Post not found" }, 404);
 	}
 
@@ -467,6 +478,6 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 		return c.json({ error: "Forbidden" }, 403);
 	}
 
-	await prisma.post.delete({ where: { id: postId } });
+	await prisma.post.update({ where: { id: postId }, data: { deletedAt: new Date() } });
 	return c.json({ success: true });
 });

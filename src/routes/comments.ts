@@ -59,10 +59,22 @@ commentsRoutes.get("/posts/:postId", async (c) => {
 	const sort = c.req.query("sort") === "top" ? "top" : "new";
 	const viewer = await tryGetUser(c);
 
+	const cursorFilter = (() => {
+		if (!cursor) return {};
+		if (sort === "new") return { createdAt: { lt: new Date(cursor) } };
+		const colonIdx = cursor.indexOf(":");
+		const clapCount = Number(cursor.slice(0, colonIdx));
+		const createdAt = new Date(cursor.slice(colonIdx + 1));
+		if (colonIdx === -1 || isNaN(clapCount) || isNaN(createdAt.getTime())) return {};
+		return {
+			OR: [{ clapCount: { lt: clapCount } }, { clapCount, createdAt: { lt: createdAt } }],
+		};
+	})();
+
 	const where = {
 		postId,
 		parentId: null,
-		...(cursor && sort === "new" ? { createdAt: { lt: new Date(cursor) } } : {}),
+		...cursorFilter,
 	};
 
 	const orderBy =
@@ -87,8 +99,12 @@ commentsRoutes.get("/posts/:postId", async (c) => {
 
 	const hasMore = top.length > limit;
 	const items = hasMore ? top.slice(0, limit) : top;
-	const nextCursor =
-		hasMore && sort === "new" ? items[items.length - 1].createdAt.toISOString() : null;
+	const lastItem = items[items.length - 1];
+	const nextCursor = hasMore
+		? sort === "new"
+			? lastItem.createdAt.toISOString()
+			: `${lastItem.clapCount}:${lastItem.createdAt.toISOString()}`
+		: null;
 
 	const replies = items.length
 		? await prisma.comment.findMany({
