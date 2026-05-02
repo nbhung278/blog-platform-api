@@ -14,6 +14,7 @@ import { notificationsRoutes } from "./routes/notifications";
 import { clapsRoutes } from "./routes/claps";
 import { bookmarksRoutes } from "./routes/bookmarks";
 import { commentsRoutes } from "./routes/comments";
+import { conversationsRoutes } from "./routes/conversations";
 import { startWorkers } from "./queue";
 import { startViewCountFlusher } from "./lib/view-counter";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
@@ -69,6 +70,7 @@ app.route("/api/notifications", notificationsRoutes);
 app.route("/api/claps", clapsRoutes);
 app.route("/api/bookmarks", bookmarksRoutes);
 app.route("/api/comments", commentsRoutes);
+app.route("/api/conversations", conversationsRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 
