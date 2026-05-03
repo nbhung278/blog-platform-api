@@ -35,6 +35,7 @@ model User {
   commentClaps             CommentClap[]
   conversationParticipants ConversationParticipant[]
   sentMessages             DirectMessage[]           @relation("SentMessages")
+  messageReactions         MessageReaction[]
 
   @@map("users")
 }
@@ -351,11 +352,43 @@ model DirectMessage {
   content        String?
   imageUrl       String?   @map("image_url")
   createdAt      DateTime  @default(now()) @map("created_at")
+  editedAt       DateTime? @map("edited_at")
   deletedAt      DateTime? @map("deleted_at")
+  replyToId      String?   @map("reply_to_id") @db.Uuid
 
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender       User         @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  conversation Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User            @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  replyTo      DirectMessage?  @relation("MessageReplies", fields: [replyToId], references: [id])
+  replies      DirectMessage[] @relation("MessageReplies")
+  reactions    MessageReaction[]
+  hiddenBy     MessageHiddenByUser[]
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@map("direct_messages")
+}
+
+model MessageReaction {
+  id        String   @id @default(uuid()) @db.Uuid
+  messageId String   @map("message_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  emoji     String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message DirectMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+  @@map("message_reactions")
+}
+
+model MessageHiddenByUser {
+  messageId String   @map("message_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  hiddenAt  DateTime @default(now()) @map("hidden_at")
+
+  message DirectMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, userId])
+  @@map("message_hidden_by_user")
 }

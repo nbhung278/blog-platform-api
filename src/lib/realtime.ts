@@ -6,7 +6,10 @@ type WS = ServerWebSocket<WSData>;
 export type RealtimeMessage =
 	| { kind: "notification"; data: unknown }
 	| { kind: "unread_count"; count: number }
-	| { kind: "chat_message"; data: unknown };
+	| { kind: "chat_message"; data: unknown }
+	| { kind: "message_reaction"; data: unknown }
+	| { kind: "message_edit"; data: unknown }
+	| { kind: "message_delete"; data: unknown };
 
 const subscribers = new Map<string, Set<WS>>();
 
