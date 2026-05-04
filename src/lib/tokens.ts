@@ -69,6 +69,31 @@ export async function bumpTokenVersion(userId: string) {
 	return updated.tokenVersion;
 }
 
+// Bulk variant for permission/role-change events that affect many users at
+// once. Issues one DB statement per concern (vs N) and runs the per-user Redis
+// cache refresh in parallel.
+export async function bumpTokenVersions(userIds: string[]) {
+	if (userIds.length === 0) return;
+	const now = new Date();
+	await prisma.$transaction([
+		prisma.user.updateMany({
+			where: { id: { in: userIds } },
+			data: { tokenVersion: { increment: 1 } },
+		}),
+		prisma.refreshToken.updateMany({
+			where: { userId: { in: userIds }, revokedAt: null },
+			data: { revokedAt: now },
+		}),
+	]);
+	// Re-read the new tokenVersions in one query so the Redis cache reflects
+	// truth rather than guessing the increment.
+	const fresh = await prisma.user.findMany({
+		where: { id: { in: userIds } },
+		select: { id: true, tokenVersion: true },
+	});
+	await Promise.all(fresh.map((u) => redis.set(tokenVersionKey(u.id), u.tokenVersion, "EX", 300)));
+}
+
 export async function issueRefreshToken(opts: {
 	userId: string;
 	userAgent?: string | null;

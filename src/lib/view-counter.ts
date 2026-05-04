@@ -26,11 +26,19 @@ export async function getPendingViewsMap(postIds: string[]): Promise<Map<string,
 	return map;
 }
 
-let flushing = false;
+const FLUSH_LOCK_KEY = "viewcount:flush:lock";
+// TTL must be long enough to cover a slow flush of a large keyspace, but short
+// enough that a crashed instance frees the lock before the next 30s tick.
+const FLUSH_LOCK_TTL_SECONDS = 60;
 
 async function flushViewCounts(): Promise<void> {
-	if (flushing) return;
-	flushing = true;
+	// SET NX EX — only one instance across the whole cluster runs a flush at a
+	// time. The local boolean was insufficient: two pods would both SCAN and
+	// race on getdel, but more importantly the post.update calls would
+	// double-apply if both reads saw the key before either getdel landed.
+	const lockToken = `${process.pid}-${Date.now()}-${Math.random()}`;
+	const acquired = await redis.set(FLUSH_LOCK_KEY, lockToken, "EX", FLUSH_LOCK_TTL_SECONDS, "NX");
+	if (acquired !== "OK") return;
 
 	try {
 		// SCAN instead of KEYS to avoid blocking Redis on large keyspaces.
@@ -43,6 +51,7 @@ async function flushViewCounts(): Promise<void> {
 		} while (cursor !== 0);
 
 		for (const key of keys) {
+			if (key === FLUSH_LOCK_KEY) continue;
 			const count = await redis.getdel(key);
 			if (!count || count === "0") continue;
 
@@ -53,7 +62,16 @@ async function flushViewCounts(): Promise<void> {
 			});
 		}
 	} finally {
-		flushing = false;
+		// Release the lock only if we still own it (don't stomp another holder
+		// after our TTL expired mid-flush).
+		const releaseScript = `
+			if redis.call("get", KEYS[1]) == ARGV[1] then
+				return redis.call("del", KEYS[1])
+			else
+				return 0
+			end
+		`;
+		await redis.eval(releaseScript, 1, FLUSH_LOCK_KEY, lockToken).catch(() => {});
 	}
 }
 

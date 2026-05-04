@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
-import { bumpTokenVersion } from "../lib/tokens";
+import { bumpTokenVersions } from "../lib/tokens";
 
 export const rolesRoutes = new Hono();
 
@@ -113,7 +113,7 @@ rolesRoutes.patch("/:id", zValidator("json", upsertRoleSchema.partial()), async 
 			where: { roleId: id },
 			select: { userId: true },
 		});
-		await Promise.all(affected.map((u) => bumpTokenVersion(u.userId)));
+		await bumpTokenVersions(affected.map((u) => u.userId));
 	}
 
 	return c.json({ success: true });

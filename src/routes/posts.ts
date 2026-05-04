@@ -155,31 +155,62 @@ postsRoutes.post(
 		const canDeleteAny = user.permissions.includes(PERMISSIONS.POST_DELETE_ANY);
 		const canDeleteOwn = user.permissions.includes(PERMISSIONS.POST_DELETE_OWN);
 
+		if (!canDeleteAny && !canDeleteOwn) {
+			return c.json({ error: "Forbidden" }, 403);
+		}
+
 		// Fetch all posts to check ownership
 		const posts = await prisma.post.findMany({
 			where: { id: { in: ids }, deletedAt: null },
 			select: { id: true, userId: true },
 		});
 
-		// If user can delete any, skip ownership check
+		// Determine which posts the caller may actually delete. If they can only
+		// delete their own, refuse the whole request when any forbidden id is
+		// present — mixing allowed/forbidden in a bulk op is treated as caller
+		// error rather than partial-success, so behavior matches the existing
+		// API contract.
+		const targetIds = canDeleteAny ? posts.map((p) => p.id) : [];
 		if (!canDeleteAny) {
 			const forbidden = posts.filter((p) => p.userId !== user.sub);
 			if (forbidden.length > 0) {
 				return c.json({ error: "Forbidden: you do not own some of these posts" }, 403);
 			}
-			if (!canDeleteOwn) {
-				return c.json({ error: "Forbidden" }, 403);
-			}
+			targetIds.push(...posts.filter((p) => p.userId === user.sub).map((p) => p.id));
+		}
+
+		if (targetIds.length === 0) {
+			return c.json({ deleted: 0 });
 		}
 
 		const now = new Date();
-		await prisma.post.updateMany({
-			where: { id: { in: posts.map((p) => p.id) } },
+		const result = await prisma.post.updateMany({
+			where: { id: { in: targetIds }, deletedAt: null },
 			data: { deletedAt: now },
 		});
-		return c.json({ deleted: posts.length });
+		return c.json({ deleted: result.count });
 	},
 );
+
+// Shared list-view projection — drops contentMd/contentHtml so list endpoints
+// don't ship megabytes of body markup per request.
+const POST_LIST_SELECT = {
+	id: true,
+	title: true,
+	slug: true,
+	excerpt: true,
+	coverUrl: true,
+	status: true,
+	publishedAt: true,
+	readingTime: true,
+	viewCount: true,
+	clapCount: true,
+	tags: true,
+	createdAt: true,
+	updatedAt: true,
+	user: { select: { name: true, username: true, avatarUrl: true } },
+	categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
+} as const;
 
 // Public: feed of all published posts from every author
 postsRoutes.get("/feed", async (c) => {
@@ -191,10 +222,7 @@ postsRoutes.get("/feed", async (c) => {
 		orderBy: [{ publishedAt: "desc" }, { id: "desc" }],
 		take: limit + 1,
 		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-		include: {
-			user: { select: { name: true, username: true, avatarUrl: true } },
-			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
-		},
+		select: POST_LIST_SELECT,
 	});
 
 	const hasMore = result.length > limit;
@@ -232,10 +260,7 @@ postsRoutes.get("/search", async (c) => {
 		where,
 		orderBy: { publishedAt: "desc" },
 		take: 50,
-		include: {
-			user: { select: { name: true, username: true, avatarUrl: true } },
-			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
-		},
+		select: POST_LIST_SELECT,
 	});
 
 	const items = await withPendingViews(result);
@@ -316,11 +341,7 @@ postsRoutes.get("/public/:username", async (c) => {
 				: { status: "published" }),
 		},
 		orderBy: [{ publishedAt: "desc" }, { updatedAt: "desc" }],
-		include: {
-			user: {
-				select: { name: true, username: true, avatarUrl: true },
-			},
-		},
+		select: POST_LIST_SELECT,
 	});
 
 	return c.json(await withPendingViews(result));

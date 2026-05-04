@@ -13,6 +13,7 @@ export interface LLMProvider {
 	): Promise<string>;
 	stream(messages: Message[], options?: { maxTokens?: number }): AsyncIterable<string>;
 	embed(text: string): Promise<number[]>;
+	embedBatch(texts: string[]): Promise<number[][]>;
 }
 
 class OpenAIProvider implements LLMProvider {
@@ -55,6 +56,19 @@ class OpenAIProvider implements LLMProvider {
 			input: text,
 		});
 		return response.data[0].embedding;
+	}
+
+	async embedBatch(texts: string[]): Promise<number[][]> {
+		if (texts.length === 0) return [];
+		const response = await this.client.embeddings.create({
+			model: process.env.EMBEDDING_MODEL || "text-embedding-3-small",
+			input: texts,
+		});
+		// OpenAI returns embeddings in input order, but sort by index defensively.
+		return response.data
+			.slice()
+			.sort((a, b) => a.index - b.index)
+			.map((d) => d.embedding);
 	}
 }
 
@@ -116,6 +130,18 @@ class AnthropicProvider implements LLMProvider {
 			input: text,
 		});
 		return response.data[0].embedding;
+	}
+
+	async embedBatch(texts: string[]): Promise<number[][]> {
+		if (texts.length === 0) return [];
+		const response = await this.openai.embeddings.create({
+			model: process.env.EMBEDDING_MODEL || "text-embedding-3-small",
+			input: texts,
+		});
+		return response.data
+			.slice()
+			.sort((a, b) => a.index - b.index)
+			.map((d) => d.embedding);
 	}
 }
 

@@ -57,41 +57,49 @@ export async function notifyFollowersOfPost(
 }
 
 // Batch fan-out: deliver one notification to many recipients (for post publish).
-// Creates per-recipient inside a transaction so each row's id is captured —
-// otherwise concurrent fan-outs sharing actor/type/post can confuse a re-query
-// and broadcast the wrong row to a recipient.
+// Uses createManyAndReturn so all rows are inserted in a single statement and
+// we still get back the generated ids for realtime delivery. The actor and
+// post relations are looked up once and merged in memory (they're identical
+// across recipients), avoiding N relation joins.
 export async function fanoutNotification(
 	recipients: string[],
 	input: Omit<CreateNotificationInput, "userId">,
 ) {
 	if (recipients.length === 0) return;
 
-	const created = await prisma.$transaction(
-		recipients.map((userId) =>
-			prisma.notification.create({
-				data: {
-					userId,
-					actorId: input.actorId,
-					type: input.type,
-					postId: input.postId,
-					commentId: input.commentId,
-				},
-				include: {
-					actor: { select: { id: true, name: true, username: true, avatarUrl: true } },
-					post: {
-						select: {
-							id: true,
-							slug: true,
-							title: true,
-							user: { select: { username: true } },
-						},
+	const [actor, post, created] = await Promise.all([
+		input.actorId
+			? prisma.user.findUnique({
+					where: { id: input.actorId },
+					select: { id: true, name: true, username: true, avatarUrl: true },
+				})
+			: Promise.resolve(null),
+		input.postId
+			? prisma.post.findUnique({
+					where: { id: input.postId },
+					select: {
+						id: true,
+						slug: true,
+						title: true,
+						user: { select: { username: true } },
 					},
-				},
-			}),
-		),
-	);
+				})
+			: Promise.resolve(null),
+		prisma.notification.createManyAndReturn({
+			data: recipients.map((userId) => ({
+				userId,
+				actorId: input.actorId,
+				type: input.type,
+				postId: input.postId,
+				commentId: input.commentId,
+			})),
+		}),
+	]);
 
 	for (const notif of created) {
-		publishToUser(notif.userId, { kind: "notification", data: notif });
+		publishToUser(notif.userId, {
+			kind: "notification",
+			data: { ...notif, actor, post },
+		});
 	}
 }

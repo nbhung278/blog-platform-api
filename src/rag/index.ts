@@ -47,24 +47,48 @@ export function chunkByHeadings(markdown: string): Chunk[] {
 	return chunks;
 }
 
+function serializeEmbedding(embedding: number[]): string {
+	if (!Array.isArray(embedding) || embedding.length === 0) {
+		throw new Error("Invalid embedding: empty or not an array");
+	}
+	for (const v of embedding) {
+		if (typeof v !== "number" || !Number.isFinite(v)) {
+			throw new Error("Invalid embedding value (NaN/Infinity)");
+		}
+	}
+	return `[${embedding.join(",")}]`;
+}
+
 /**
  * Embed and insert chunks into post_chunks table.
  * Uses raw SQL for the pgvector embedding column.
+ *
+ * Embeddings are produced in a single batch call instead of one-per-chunk —
+ * OpenAI accepts an array `input` and returns one vector per element, so a
+ * post with N chunks costs 1 round-trip rather than N.
  */
 export async function indexChunks(postId: string, userId: string, chunks: Chunk[]): Promise<void> {
+	if (chunks.length === 0) return;
 	const llm = getLLMProvider();
 
-	for (const chunk of chunks) {
-		const textToEmbed = chunk.heading ? `${chunk.heading}\n${chunk.content}` : chunk.content;
+	const texts = chunks.map((c) => (c.heading ? `${c.heading}\n${c.content}` : c.content));
+	const embeddings = await llm.embedBatch(texts);
 
-		const embedding = await llm.embed(textToEmbed);
-
-		// Insert with raw SQL for pgvector embedding column
-		await prisma.$executeRaw`
-      INSERT INTO post_chunks (id, post_id, user_id, chunk_idx, heading, content, embedding, created_at)
-      VALUES (gen_random_uuid(), ${postId}::uuid, ${userId}::uuid, ${chunk.chunkIdx}, ${chunk.heading}, ${chunk.content}, ${`[${embedding.join(",")}]`}::vector, NOW())
-    `;
+	if (embeddings.length !== chunks.length) {
+		throw new Error(
+			`Embedding count mismatch: expected ${chunks.length}, got ${embeddings.length}`,
+		);
 	}
+
+	await Promise.all(
+		chunks.map((chunk, i) => {
+			const embeddingStr = serializeEmbedding(embeddings[i]);
+			return prisma.$executeRaw`
+      INSERT INTO post_chunks (id, post_id, user_id, chunk_idx, heading, content, embedding, created_at)
+      VALUES (gen_random_uuid(), ${postId}::uuid, ${userId}::uuid, ${chunk.chunkIdx}, ${chunk.heading}, ${chunk.content}, ${embeddingStr}::vector, NOW())
+    `;
+		}),
+	);
 }
 
 /**
@@ -79,7 +103,7 @@ export async function semanticSearch(
 	const k = topK || Number(process.env.RAG_TOP_K) || 5;
 
 	const queryEmbedding = await llm.embed(query);
-	const embeddingStr = `[${queryEmbedding.join(",")}]`;
+	const embeddingStr = serializeEmbedding(queryEmbedding);
 
 	const results = await prisma.$queryRaw<{ heading: string | null; content: string }[]>`
     SELECT heading, content
