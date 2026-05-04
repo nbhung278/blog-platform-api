@@ -4,6 +4,8 @@ build/
 .env
 .env.local
 .env.*.local
+.env.production
+.env.development
 *.log
 .DS_Store
 .idea/

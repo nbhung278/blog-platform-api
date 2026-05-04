@@ -29,6 +29,13 @@ const CSRF_TTL_SECONDS = REFRESH_TTL_SECONDS;
 
 const isProd = process.env.NODE_ENV === "production";
 
+// In prod, SPAs and the API live on different subdomains
+// (e.g. admin.example.com and api.example.com), so cookies must be sent
+// cross-site. SameSite=None requires Secure=true. COOKIE_DOMAIN scopes the
+// cookie to the parent domain so both subdomains receive it.
+// In dev (everything on localhost), keep Strict for stronger CSRF protection.
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || undefined;
+
 type CookieRole = "access" | "refresh" | "csrf";
 
 const TTL_BY_ROLE: Record<CookieRole, number> = {
@@ -42,9 +49,10 @@ function baseOptions(role: CookieRole) {
 		// CSRF cookie must be readable by JS (double-submit pattern).
 		httpOnly: role !== "csrf",
 		secure: isProd,
-		sameSite: "Strict" as const,
+		sameSite: isProd ? ("None" as const) : ("Strict" as const),
 		path: "/",
 		maxAge: TTL_BY_ROLE[role],
+		...(COOKIE_DOMAIN ? { domain: COOKIE_DOMAIN } : {}),
 	};
 }
 
@@ -92,7 +100,12 @@ export function rotateCsrfCookie(c: Context) {
 
 export function clearAuthCookies(c: Context) {
 	const names = COOKIE_NAMES[getAppKind(c)];
-	const opts = { path: "/", secure: isProd, sameSite: "Strict" as const };
+	const opts = {
+		path: "/",
+		secure: isProd,
+		sameSite: isProd ? ("None" as const) : ("Strict" as const),
+		...(COOKIE_DOMAIN ? { domain: COOKIE_DOMAIN } : {}),
+	};
 	deleteCookie(c, names.access, opts);
 	deleteCookie(c, names.refresh, opts);
 	deleteCookie(c, names.csrf, opts);

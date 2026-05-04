@@ -109,5 +109,3 @@ const server = Bun.serve<WSData, never>({
 });
 
 console.log(`[server] Listening on http://localhost:${server.port}`);
-
-export default server;
