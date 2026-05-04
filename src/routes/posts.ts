@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../db";
 import { authMiddleware, requireAnyPermission, tryGetUser } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
+import { ipRateLimit } from "../middleware/rate-limit";
 import { enqueuePostIndexing } from "../queue";
 import { incrementView, getPendingViews, getPendingViewsMap } from "../lib/view-counter";
 import { notifyFollowersOfPost } from "../lib/notifications";
@@ -18,28 +19,28 @@ const POST_STATUSES = ["draft", "pending", "published", "rejected"] as const;
 type PostStatus = (typeof POST_STATUSES)[number];
 
 const createPostSchema = z.object({
-	title: z.string().min(1),
-	contentMd: z.string(),
-	contentHtml: z.string(),
-	excerpt: z.string().optional(),
+	title: z.string().min(1).max(200),
+	contentMd: z.string().max(200_000),
+	contentHtml: z.string().max(400_000),
+	excerpt: z.string().max(500).optional(),
 	coverUrl: z.string().url().nullable().optional(),
 	status: z.enum(POST_STATUSES).default("draft"),
-	tags: z.array(z.string()).default([]),
-	metaTitle: z.string().optional(),
-	metaDesc: z.string().optional(),
+	tags: z.array(z.string().max(50)).max(20).default([]),
+	metaTitle: z.string().max(200).optional(),
+	metaDesc: z.string().max(500).optional(),
 	categoryIds: z.array(z.string().uuid()).min(1, "At least one category is required"),
 });
 
 const updatePostSchema = z.object({
-	title: z.string().min(1).optional(),
-	contentMd: z.string().optional(),
-	contentHtml: z.string().optional(),
-	excerpt: z.string().optional(),
+	title: z.string().min(1).max(200).optional(),
+	contentMd: z.string().max(200_000).optional(),
+	contentHtml: z.string().max(400_000).optional(),
+	excerpt: z.string().max(500).optional(),
 	coverUrl: z.string().url().nullable().optional(),
 	status: z.enum(POST_STATUSES).optional(),
-	tags: z.array(z.string()).optional(),
-	metaTitle: z.string().optional(),
-	metaDesc: z.string().optional(),
+	tags: z.array(z.string().max(50)).max(20).optional(),
+	metaTitle: z.string().max(200).optional(),
+	metaDesc: z.string().max(500).optional(),
 	version: z.number().int(),
 	categoryIds: z.array(z.string().uuid()).min(1, "At least one category is required").optional(),
 });
@@ -94,7 +95,7 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 	const scope = c.req.query("scope"); // "mine" | "all"
 	const statusFilter = c.req.query("status") as PostStatus | undefined;
 	const categoryId = c.req.query("categoryId");
-	const q = (c.req.query("q") ?? "").trim();
+	const q = (c.req.query("q") ?? "").trim().slice(0, 200);
 	const page = Math.max(1, Number(c.req.query("page")) || 1);
 	const limit = Math.min(100, Math.max(1, Number(c.req.query("limit")) || 20));
 
@@ -213,59 +214,68 @@ const POST_LIST_SELECT = {
 } as const;
 
 // Public: feed of all published posts from every author
-postsRoutes.get("/feed", async (c) => {
-	const limit = Math.min(Number(c.req.query("limit")) || 20, 50);
-	const cursor = c.req.query("cursor");
+postsRoutes.get(
+	"/feed",
+	ipRateLimit({ keyPrefix: "feed", limit: 120, windowSeconds: 60 }),
+	async (c) => {
+		c.header("Cache-Control", "public, s-maxage=30, stale-while-revalidate=60");
+		const limit = Math.min(Number(c.req.query("limit")) || 20, 50);
+		const cursor = c.req.query("cursor");
 
-	const result = await prisma.post.findMany({
-		where: { status: "published", deletedAt: null },
-		orderBy: [{ publishedAt: "desc" }, { id: "desc" }],
-		take: limit + 1,
-		...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-		select: POST_LIST_SELECT,
-	});
+		const result = await prisma.post.findMany({
+			where: { status: "published", deletedAt: null },
+			orderBy: [{ publishedAt: "desc" }, { id: "desc" }],
+			take: limit + 1,
+			...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+			select: POST_LIST_SELECT,
+		});
 
-	const hasMore = result.length > limit;
-	const items = hasMore ? result.slice(0, limit) : result;
-	const nextCursor = hasMore ? items[items.length - 1].id : null;
+		const hasMore = result.length > limit;
+		const items = hasMore ? result.slice(0, limit) : result;
+		const nextCursor = hasMore ? items[items.length - 1].id : null;
 
-	return c.json({ items: await withPendingViews(items), nextCursor });
-});
+		return c.json({ items: await withPendingViews(items), nextCursor });
+	},
+);
 
 // Public: search posts by text query OR filter by category slug
-postsRoutes.get("/search", async (c) => {
-	const q = (c.req.query("q") ?? "").trim();
-	const categorySlug = (c.req.query("category") ?? "").trim();
+postsRoutes.get(
+	"/search",
+	ipRateLimit({ keyPrefix: "post-search", limit: 30, windowSeconds: 60 }),
+	async (c) => {
+		const q = (c.req.query("q") ?? "").trim().slice(0, 200);
+		const categorySlug = (c.req.query("category") ?? "").trim().slice(0, 100);
 
-	if (!q && !categorySlug) return c.json({ items: [], total: 0 });
+		if (!q && !categorySlug) return c.json({ items: [], total: 0 });
 
-	const where = categorySlug
-		? {
-				status: "published" as const,
-				deletedAt: null,
-				categories: { some: { category: { slug: categorySlug } } },
-			}
-		: {
-				status: "published" as const,
-				deletedAt: null,
-				OR: [
-					{ title: { contains: q, mode: "insensitive" as const } },
-					{ tags: { has: q } },
-					{ user: { name: { contains: q, mode: "insensitive" as const } } },
-					{ user: { username: { contains: q, mode: "insensitive" as const } } },
-				],
-			};
+		const where = categorySlug
+			? {
+					status: "published" as const,
+					deletedAt: null,
+					categories: { some: { category: { slug: categorySlug } } },
+				}
+			: {
+					status: "published" as const,
+					deletedAt: null,
+					OR: [
+						{ title: { contains: q, mode: "insensitive" as const } },
+						{ tags: { has: q } },
+						{ user: { name: { contains: q, mode: "insensitive" as const } } },
+						{ user: { username: { contains: q, mode: "insensitive" as const } } },
+					],
+				};
 
-	const result = await prisma.post.findMany({
-		where,
-		orderBy: { publishedAt: "desc" },
-		take: 50,
-		select: POST_LIST_SELECT,
-	});
+		const result = await prisma.post.findMany({
+			where,
+			orderBy: { publishedAt: "desc" },
+			take: 50,
+			select: POST_LIST_SELECT,
+		});
 
-	const items = await withPendingViews(result);
-	return c.json({ items, total: items.length });
-});
+		const items = await withPendingViews(result);
+		return c.json({ items, total: items.length });
+	},
+);
 
 // [auth] Get a single post by id (for editing / preview).
 // Author can read own, moderator/admin can read any.
@@ -299,57 +309,67 @@ postsRoutes.get("/id/:id", authMiddleware, async (c) => {
 });
 
 // Public: get post by slug
-postsRoutes.get("/:slug", async (c) => {
-	const slug = c.req.param("slug");
+postsRoutes.get(
+	"/:slug",
+	ipRateLimit({ keyPrefix: "post-slug", limit: 300, windowSeconds: 60 }),
+	async (c) => {
+		c.header("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
+		const slug = c.req.param("slug");
 
-	const post = await prisma.post.findFirst({
-		where: { slug, status: "published", deletedAt: null },
-	});
+		const post = await prisma.post.findFirst({
+			where: { slug, status: "published", deletedAt: null },
+		});
 
-	if (!post) {
-		return c.json({ error: "Post not found" }, 404);
-	}
+		if (!post) {
+			return c.json({ error: "Post not found" }, 404);
+		}
 
-	// Increment first, then read pending — guarantees the current view is reflected.
-	await incrementView(post.id).catch((err) => console.error("[view] increment failed:", err));
-	const pending = await getPendingViews(post.id);
+		// Increment first, then read pending — guarantees the current view is reflected.
+		await incrementView(post.id).catch((err) => console.error("[view] increment failed:", err));
+		const pending = await getPendingViews(post.id);
 
-	return c.json({ ...post, viewCount: post.viewCount + pending });
-});
+		return c.json({ ...post, viewCount: post.viewCount + pending });
+	},
+);
 
 // Public: list posts by username. The author themself sees own
 // drafts/pending/rejected as well, so they can manage in-flight work
 // from their profile page.
-postsRoutes.get("/public/:username", async (c) => {
-	const username = c.req.param("username");
-	const viewer = await tryGetUser(c);
+postsRoutes.get(
+	"/public/:username",
+	ipRateLimit({ keyPrefix: "post-by-user", limit: 60, windowSeconds: 60 }),
+	async (c) => {
+		const username = c.req.param("username");
+		const viewer = await tryGetUser(c);
 
-	const author = await prisma.user.findUnique({
-		where: { username },
-		select: { id: true },
-	});
-	if (!author) return c.json([]);
+		const author = await prisma.user.findUnique({
+			where: { username },
+			select: { id: true },
+		});
+		if (!author) return c.json([]);
 
-	const isOwner = viewer?.sub === author.id;
+		const isOwner = viewer?.sub === author.id;
 
-	const result = await prisma.post.findMany({
-		where: {
-			user: { username },
-			deletedAt: null,
-			...(isOwner
-				? { status: { in: ["draft", "pending", "published", "rejected"] } }
-				: { status: "published" }),
-		},
-		orderBy: [{ publishedAt: "desc" }, { updatedAt: "desc" }],
-		select: POST_LIST_SELECT,
-	});
+		const result = await prisma.post.findMany({
+			where: {
+				user: { username },
+				deletedAt: null,
+				...(isOwner
+					? { status: { in: ["draft", "pending", "published", "rejected"] } }
+					: { status: "published" }),
+			},
+			orderBy: [{ publishedAt: "desc" }, { updatedAt: "desc" }],
+			select: POST_LIST_SELECT,
+		});
 
-	return c.json(await withPendingViews(result));
-});
+		return c.json(await withPendingViews(result));
+	},
+);
 
 // [auth] Create post — needs write:own or write:any.
 postsRoutes.post(
 	"/",
+	ipRateLimit({ keyPrefix: "post-create", limit: 20, windowSeconds: 60 * 60 }),
 	authMiddleware,
 	requireAnyPermission(PERMISSIONS.POST_WRITE_OWN, PERMISSIONS.POST_WRITE_ANY),
 	zValidator("json", createPostSchema),

@@ -159,7 +159,7 @@ authRoutes.post(
 
 authRoutes.post(
 	"/register",
-	ipRateLimit({ keyPrefix: "register", limit: 20, windowSeconds: 60 * 15 }),
+	ipRateLimit({ keyPrefix: "register", limit: 5, windowSeconds: 60 * 60 }),
 	zValidator("json", registerSchema),
 	async (c) => {
 		if (process.env.ALLOW_REGISTRATION !== "true") {

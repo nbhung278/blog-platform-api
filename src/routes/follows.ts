@@ -23,9 +23,11 @@ async function getUserByUsername(username: string) {
 	});
 }
 
+const readLimit = ipRateLimit({ keyPrefix: "follow-stats", limit: 60, windowSeconds: 60 });
+
 // Public: how many followers/following a user has, plus (if signed in) whether
 // the caller is following them.
-followsRoutes.get("/:username/stats", async (c) => {
+followsRoutes.get("/:username/stats", readLimit, async (c) => {
 	const username = c.req.param("username");
 	const target = await getUserByUsername(username);
 	if (!target) return c.json({ error: "User not found" }, 404);

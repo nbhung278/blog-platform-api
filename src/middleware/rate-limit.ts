@@ -10,9 +10,22 @@ type Options = {
 };
 
 export function getClientIp(c: Context): string {
-	return (
-		c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "unknown"
-	);
+	// When TRUST_PROXY=true the server sits behind a trusted reverse proxy
+	// (Cloudflare, nginx, etc.) that strips and re-sets forwarded headers.
+	// Priority: CF-Connecting-IP (set exclusively by Cloudflare, most reliable)
+	// → X-Real-IP (set by nginx) → X-Forwarded-For → socket IP fallback.
+	// When false, always use the actual TCP socket IP injected at the Bun.serve
+	// level (see index.ts), which clients cannot spoof.
+	if (process.env.TRUST_PROXY === "true") {
+		return (
+			c.req.header("cf-connecting-ip") ||
+			c.req.header("x-real-ip") ||
+			c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+			c.req.header("x-real-socket-ip") ||
+			"unknown"
+		);
+	}
+	return c.req.header("x-real-socket-ip") || "unknown";
 }
 
 export function ipRateLimit({ keyPrefix, limit, windowSeconds, keyExtractor }: Options) {

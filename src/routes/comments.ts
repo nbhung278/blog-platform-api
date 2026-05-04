@@ -8,6 +8,7 @@ import { ipRateLimit } from "../middleware/rate-limit";
 import { createNotification } from "../lib/notifications";
 
 const writeLimit = ipRateLimit({ keyPrefix: "comment-write", limit: 30, windowSeconds: 60 });
+const readLimit = ipRateLimit({ keyPrefix: "comment-read", limit: 60, windowSeconds: 60 });
 
 export const commentsRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
@@ -52,7 +53,7 @@ function serialize(c: CommentRow, myClaps = 0) {
 
 // Public list — paged top-level comments + every reply for those threads.
 // We bundle all replies in one query (no N+1) and group them client-side.
-commentsRoutes.get("/posts/:postId", async (c) => {
+commentsRoutes.get("/posts/:postId", readLimit, async (c) => {
 	const postId = c.req.param("postId");
 	const limit = Math.min(50, Math.max(1, Number(c.req.query("limit")) || 20));
 	const cursor = c.req.query("cursor");

@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { uploadImage } from "../lib/s3";
+import { ipRateLimit } from "../middleware/rate-limit";
+
+const uploadLimit = ipRateLimit({ keyPrefix: "upload", limit: 20, windowSeconds: 60 * 15 });
 
 export const uploadsRoutes = new Hono();
 
@@ -16,6 +19,7 @@ const EXT_BY_TYPE: Record<string, string> = {
 
 uploadsRoutes.post(
 	"/image",
+	uploadLimit,
 	authMiddleware,
 	requirePermission(PERMISSIONS.MEDIA_UPLOAD),
 	async (c) => {

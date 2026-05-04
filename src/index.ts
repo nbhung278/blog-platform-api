@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { bodyLimit } from "hono/body-limit";
 import { authRoutes } from "./routes/auth";
 import { postsRoutes } from "./routes/posts";
 import { categoriesRoutes } from "./routes/categories";
@@ -22,6 +23,10 @@ import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
 const app = new Hono();
 
 app.use("*", logger());
+
+// Hard cap on request body size to prevent memory-exhaustion attacks.
+// The upload route enforces its own 5 MB file cap on top of this.
+app.use("*", bodyLimit({ maxSize: 10 * 1024 * 1024 }));
 const allowedOrigins = [
 	process.env.APP_URL || "http://localhost:5173",
 	process.env.ADMIN_URL || "http://localhost:5174",
@@ -84,6 +89,15 @@ console.log(`[server] Starting on port ${port}`);
 const server = Bun.serve<WSData, never>({
 	port,
 	async fetch(req, server) {
+		// Inject the real TCP socket IP so rate-limit middleware can always
+		// read it via x-real-socket-ip regardless of proxy headers. We strip
+		// any client-supplied value first so it can't be spoofed.
+		const socketIp = server.requestIP(req);
+		const headers = new Headers(req.headers);
+		headers.delete("x-real-socket-ip");
+		if (socketIp) headers.set("x-real-socket-ip", socketIp.address);
+		req = new Request(req, { headers });
+
 		const url = new URL(req.url);
 		// WebSocket upgrade handshake — auth via the access cookie before promoting
 		// the connection. Origin is also enforced so only our SPAs can open sockets.

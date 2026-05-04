@@ -4,6 +4,9 @@ import { z } from "zod";
 import { prisma } from "../db";
 import { authMiddleware, requireAnyPermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
+import { ipRateLimit } from "../middleware/rate-limit";
+
+const readLimit = ipRateLimit({ keyPrefix: "categories-read", limit: 60, windowSeconds: 60 });
 
 export const categoriesRoutes = new Hono();
 
@@ -22,7 +25,8 @@ const categorySchema = z.object({
 });
 
 // Public: list all categories (includes postCount)
-categoriesRoutes.get("/", async (c) => {
+categoriesRoutes.get("/", readLimit, async (c) => {
+	c.header("Cache-Control", "public, max-age=300, stale-while-revalidate=60");
 	const categories = await prisma.category.findMany({
 		orderBy: { name: "asc" },
 		include: { _count: { select: { posts: true } } },

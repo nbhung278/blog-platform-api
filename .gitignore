@@ -14,3 +14,4 @@ coverage/
 # Note: bun.lock (text format) is committed for reproducible installs.
 # Old binary lockfile is ignored:
 bun.lockb
+nginx/certs/
