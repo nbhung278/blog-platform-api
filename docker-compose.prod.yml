@@ -2,18 +2,24 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    mem_limit: 320m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command:
       - "postgres"
       - "-c"
-      - "shared_buffers=128MB"
+      - "shared_buffers=80MB"
       - "-c"
-      - "effective_cache_size=384MB"
+      - "effective_cache_size=200MB"
       - "-c"
-      - "maintenance_work_mem=32MB"
+      - "maintenance_work_mem=24MB"
       - "-c"
-      - "work_mem=4MB"
+      - "work_mem=2MB"
       - "-c"
-      - "max_connections=30"
+      - "max_connections=20"
       - "-c"
       - "max_parallel_workers=2"
     environment:
@@ -31,7 +37,22 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    mem_limit: 96m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "96mb",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
     volumes:
       - redisdata:/data
     healthcheck:
@@ -45,6 +66,12 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 384m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +107,12 @@ services:
   nginx:
     image: nginx:alpine
     restart: unless-stopped
+    mem_limit: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "80:80"
       - "443:443"
