@@ -1,7 +1,12 @@
 FROM oven/bun:1.2-alpine AS base
 WORKDIR /app
+# sharp needs libvips at runtime; install once in the base layer so every
+# downstream stage has it.
+RUN apk add --no-cache vips
 
 FROM base AS deps
+# Headers + compiler needed only while sharp links against libvips during install.
+RUN apk add --no-cache vips-dev build-base python3
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 

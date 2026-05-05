@@ -4,30 +4,50 @@ import { z } from "zod";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission, type JWTPayload } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
+import { ipRateLimit } from "../middleware/rate-limit";
 
 export const analyticsRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
+
+// Tight cap on the public ingest endpoint. Each value is short metadata; we
+// truncate aggressively because anything bigger is almost certainly noise or
+// abuse.
+const META_FIELD_MAX = 200;
+const SESSION_ID_MAX = 128;
 
 const eventSchema = z.object({
 	postId: z.string().uuid(),
 	event: z.enum(["pageview", "scroll_50", "scroll_100", "like", "share"]),
 	meta: z
 		.object({
-			referrer: z.string().optional(),
-			country: z.string().optional(),
-			device: z.string().optional(),
-			os: z.string().optional(),
+			referrer: z.string().max(META_FIELD_MAX).optional(),
+			country: z.string().max(META_FIELD_MAX).optional(),
+			device: z.string().max(META_FIELD_MAX).optional(),
+			os: z.string().max(META_FIELD_MAX).optional(),
 		})
 		.optional(),
 });
 
+// Public endpoint — IP-bounded so anonymous traffic can't fill the table.
+const eventLimit = ipRateLimit({ keyPrefix: "analytics-event", limit: 60, windowSeconds: 60 });
+
 // Public: track event
-analyticsRoutes.post("/event", zValidator("json", eventSchema), async (c) => {
+analyticsRoutes.post("/event", eventLimit, zValidator("json", eventSchema), async (c) => {
 	const body = c.req.valid("json");
+
+	// Reject events for non-existent or non-published posts so the table stays
+	// honest. `select: { id }` is cheap and indexed by PK.
+	const post = await prisma.post.findFirst({
+		where: { id: body.postId, status: "published" },
+		select: { id: true },
+	});
+	if (!post) return c.json({ error: "Post not found" }, 404);
+
+	const sessionId = (c.req.header("x-session-id") || "").slice(0, SESSION_ID_MAX) || null;
 
 	await prisma.analyticsEvent.create({
 		data: {
 			postId: body.postId,
-			sessionId: c.req.header("x-session-id") || null,
+			sessionId,
 			event: body.event,
 			meta: body.meta || {},
 		},

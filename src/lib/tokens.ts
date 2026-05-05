@@ -3,6 +3,7 @@ import { sign } from "hono/jwt";
 import { prisma } from "../db";
 import { redis } from "./redis";
 import { loadUserRolesAndPermissions } from "./user-permissions";
+import { env } from "./env";
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -28,7 +29,7 @@ export async function issueAccessToken(user: AccessTokenUser) {
 			tokenVersion: user.tokenVersion,
 			exp: Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
 		},
-		process.env.JWT_SECRET!,
+		env.JWT_SECRET,
 	);
 	return { token, roles, permissions };
 }

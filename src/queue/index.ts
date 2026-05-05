@@ -2,6 +2,7 @@ import { Queue, Worker } from "bullmq";
 import { redis } from "../lib/redis";
 import { prisma } from "../db";
 import { chunkByHeadings, indexChunks } from "../rag";
+import { logger } from "../lib/logger";
 
 const connection = redis;
 
@@ -19,8 +20,10 @@ const postIndexingQueue = new Queue("post-indexing", {
 
 export async function enqueuePostIndexing(postId: string, userId: string): Promise<void> {
 	await postIndexingQueue.add("index", { postId, userId });
-	console.log(`[queue] Enqueued post ${postId} for indexing`);
+	logger.info({ postId }, "[queue] enqueued post for indexing");
 }
+
+let runningWorker: Worker | null = null;
 
 export function startWorkers(): void {
 	const worker = new Worker(
@@ -34,7 +37,7 @@ export function startWorkers(): void {
 			});
 
 			if (!post) {
-				console.log(`[indexing] Post ${postId} not found, skipping`);
+				logger.info({ postId }, "[indexing] post not found, skipping");
 				return;
 			}
 
@@ -46,7 +49,7 @@ export function startWorkers(): void {
 			// Index new chunks
 			await indexChunks(postId, userId, chunks);
 
-			console.log(`[indexing] Post ${postId} indexed — ${chunks.length} chunks`);
+			logger.info({ postId, chunks: chunks.length }, "[indexing] post indexed");
 		},
 		{
 			connection,
@@ -59,15 +62,25 @@ export function startWorkers(): void {
 		const attempts = job?.attemptsMade ?? 0;
 		const max = job?.opts.attempts ?? 0;
 		const exhausted = max > 0 && attempts >= max;
-		console.error(
-			`[indexing] Job ${job?.id} failed (attempt ${attempts}/${max})${exhausted ? " — exhausted, moving to failed" : " — will retry"}:`,
-			err.message,
+		logger.error(
+			{ jobId: job?.id, attempts, max, exhausted, err: err.message },
+			"[indexing] job failed",
 		);
 	});
 
 	worker.on("error", (err) => {
-		console.error("[indexing] Worker error:", err);
+		logger.error({ err }, "[indexing] worker error");
 	});
 
-	console.log("[queue] Post indexing worker started");
+	runningWorker = worker;
+	logger.info("[queue] post indexing worker started");
+}
+
+export async function stopWorkers(): Promise<void> {
+	if (runningWorker) {
+		// `close()` waits for active jobs to finish (up to grace period).
+		await runningWorker.close();
+		runningWorker = null;
+	}
+	await postIndexingQueue.close();
 }

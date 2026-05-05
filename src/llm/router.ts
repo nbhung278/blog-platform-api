@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
+import { logger } from "../lib/logger";
 
 export interface Message {
 	role: "system" | "user" | "assistant";
@@ -151,7 +152,7 @@ export function getLLMProvider(): LLMProvider {
 	if (!providerInstance) {
 		const provider = process.env.LLM_PROVIDER || "openai";
 		providerInstance = provider === "anthropic" ? new AnthropicProvider() : new OpenAIProvider();
-		console.log(`[llm] Using provider: ${provider}`);
+		logger.info({ provider }, "[llm] using provider");
 	}
 	return providerInstance;
 }

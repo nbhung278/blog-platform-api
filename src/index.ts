@@ -1,6 +1,8 @@
+// Validate env first so we fail fast on misconfiguration.
+import { env } from "./lib/env";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
+import { logger as honoLogger } from "hono/logger";
 import { bodyLimit } from "hono/body-limit";
 import { authRoutes } from "./routes/auth";
 import { postsRoutes } from "./routes/posts";
@@ -16,21 +18,21 @@ import { clapsRoutes } from "./routes/claps";
 import { bookmarksRoutes } from "./routes/bookmarks";
 import { commentsRoutes } from "./routes/comments";
 import { conversationsRoutes } from "./routes/conversations";
-import { startWorkers } from "./queue";
-import { startViewCountFlusher } from "./lib/view-counter";
+import { startWorkers, stopWorkers } from "./queue";
+import { startViewCountFlusher, stopViewCountFlusher, flushViewCounts } from "./lib/view-counter";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
+import { prisma } from "./db";
+import { redis } from "./lib/redis";
+import { logger } from "./lib/logger";
 
 const app = new Hono();
 
-app.use("*", logger());
+app.use("*", honoLogger());
 
 // Hard cap on request body size to prevent memory-exhaustion attacks.
 // The upload route enforces its own 5 MB file cap on top of this.
 app.use("*", bodyLimit({ maxSize: 10 * 1024 * 1024 }));
-const allowedOrigins = [
-	process.env.APP_URL || "http://localhost:5173",
-	process.env.ADMIN_URL || "http://localhost:5174",
-];
+const allowedOrigins = [env.APP_URL, env.ADMIN_URL];
 
 app.use(
 	"*",
@@ -56,6 +58,15 @@ app.use("*", async (c, next) => {
 	c.header("X-Frame-Options", "DENY");
 	c.header("Referrer-Policy", "no-referrer");
 	c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+	// API is consumed by SPAs hosted on a different origin, so resources must be
+	// readable cross-origin. CORS handles auth; CORP just controls embedding.
+	c.header("Cross-Origin-Resource-Policy", "cross-origin");
+	// Only set HSTS when actually served over HTTPS — otherwise browsers will
+	// pin localhost/dev hosts to https and break local dev permanently.
+	const proto = c.req.header("x-forwarded-proto") ?? new URL(c.req.url).protocol.replace(":", "");
+	if (proto === "https") {
+		c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+	}
 	c.header(
 		"Content-Security-Policy",
 		["default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"].join("; "),
@@ -79,12 +90,23 @@ app.route("/api/conversations", conversationsRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 
+// Catch-all error handler. Without this, an uncaught exception bubbles to
+// Hono's default which can leak the message + stack into the response. Log
+// the full error server-side, but only return a generic 500 to the client.
+app.onError((err, c) => {
+	logger.error(
+		{ err, path: c.req.path, method: c.req.method },
+		"[server] unhandled error in route",
+	);
+	return c.json({ error: "Internal server error" }, 500);
+});
+
 // Start background workers
 startWorkers();
 startViewCountFlusher();
 
-const port = Number(process.env.PORT) || 3000;
-console.log(`[server] Starting on port ${port}`);
+const port = env.PORT;
+logger.info({ port }, "[server] starting");
 
 const server = Bun.serve<WSData, never>({
 	port,
@@ -122,4 +144,50 @@ const server = Bun.serve<WSData, never>({
 	websocket: wsHandlers,
 });
 
-console.log(`[server] Listening on http://localhost:${server.port}`);
+logger.info({ url: `http://localhost:${server.port}` }, "[server] listening");
+
+// Graceful shutdown — drain queue + flush view counter + close infra so a
+// container restart doesn't lose in-flight work or corrupt counters.
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+	if (shuttingDown) return;
+	shuttingDown = true;
+	logger.info({ signal }, "[server] shutdown signal received");
+
+	// Stop accepting new HTTP/WS connections first.
+	server.stop();
+
+	// Stop scheduling new flushes, then run one final flush so anything sitting
+	// in Redis lands in Postgres before we exit.
+	stopViewCountFlusher();
+	try {
+		await flushViewCounts();
+	} catch (err) {
+		logger.error({ err }, "[server] final flushViewCounts failed");
+	}
+
+	// Drain BullMQ worker — waits for in-flight jobs up to the worker's grace.
+	try {
+		await stopWorkers();
+	} catch (err) {
+		logger.error({ err }, "[server] stopWorkers failed");
+	}
+
+	// Release database + Redis handles.
+	try {
+		await prisma.$disconnect();
+	} catch (err) {
+		logger.error({ err }, "[server] prisma.$disconnect failed");
+	}
+	try {
+		redis.disconnect();
+	} catch (err) {
+		logger.error({ err }, "[server] redis.disconnect failed");
+	}
+
+	logger.info("[server] shutdown complete");
+	process.exit(0);
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));

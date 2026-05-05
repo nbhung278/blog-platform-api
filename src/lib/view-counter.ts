@@ -1,5 +1,6 @@
 import { redis } from "./redis";
 import { prisma } from "../db";
+import { logger } from "./logger";
 
 export async function incrementView(postId: string): Promise<void> {
 	await redis.incr(`viewcount:${postId}`);
@@ -31,7 +32,7 @@ const FLUSH_LOCK_KEY = "viewcount:flush:lock";
 // enough that a crashed instance frees the lock before the next 30s tick.
 const FLUSH_LOCK_TTL_SECONDS = 60;
 
-async function flushViewCounts(): Promise<void> {
+export async function flushViewCounts(): Promise<void> {
 	// SET NX EX — only one instance across the whole cluster runs a flush at a
 	// time. The local boolean was insufficient: two pods would both SCAN and
 	// race on getdel, but more importantly the post.update calls would
@@ -75,7 +76,17 @@ async function flushViewCounts(): Promise<void> {
 	}
 }
 
+let flusherTimer: ReturnType<typeof setInterval> | null = null;
+
 export function startViewCountFlusher(): void {
-	setInterval(flushViewCounts, 30_000);
-	console.log("[view-counter] Flusher started (every 30s)");
+	if (flusherTimer) return;
+	flusherTimer = setInterval(flushViewCounts, 30_000);
+	logger.info("[view-counter] flusher started (every 30s)");
+}
+
+export function stopViewCountFlusher(): void {
+	if (flusherTimer) {
+		clearInterval(flusherTimer);
+		flusherTimer = null;
+	}
 }

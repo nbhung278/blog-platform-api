@@ -14,6 +14,7 @@ import {
 	getClientIp,
 } from "../middleware/rate-limit";
 import { ROLE_KEYS } from "../lib/permissions";
+import { env } from "../lib/env";
 import {
 	bumpTokenVersion,
 	consumeAndRotateRefreshToken,
@@ -22,7 +23,10 @@ import {
 	revokeRefreshToken,
 } from "../lib/tokens";
 import {
+	CSRF_HEADER,
 	clearAuthCookies,
+	csrfTokensMatch,
+	getCsrfCookie,
 	getRefreshCookie,
 	rotateAccessCookie,
 	rotateCsrfCookie,
@@ -92,12 +96,20 @@ authRoutes.get("/setup-status", async (c) => {
 	return c.json({ needsSetup: userCount === 0 });
 });
 
-// Public: bootstrap first super_admin. Only works when DB has zero users.
+// Public: bootstrap first super_admin. Only works when DB has zero users AND
+// (if SETUP_TOKEN is configured) the caller echoes the install token so
+// whoever lands on the endpoint after a DB reset can't win a race.
 authRoutes.post(
 	"/setup",
 	ipRateLimit({ keyPrefix: "setup", limit: 5, windowSeconds: 60 * 15 }),
 	zValidator("json", setupSchema),
 	async (c) => {
+		if (env.SETUP_TOKEN) {
+			const provided = c.req.header("x-setup-token");
+			if (!provided || provided !== env.SETUP_TOKEN) {
+				return c.json({ error: "Setup not allowed" }, 403);
+			}
+		}
 		const body = c.req.valid("json");
 		const superRole = await prisma.role.findUnique({
 			where: { key: ROLE_KEYS.SUPER_ADMIN },
@@ -168,13 +180,6 @@ authRoutes.post(
 
 		const { email, password, name, username } = c.req.valid("json");
 
-		const existing = await prisma.user.findFirst({
-			where: { OR: [{ email }, { username }] },
-		});
-		if (existing) {
-			return c.json({ error: "Email or username already taken" }, 400);
-		}
-
 		const passwordHash = await hash(password, 10);
 
 		const authorRole = await prisma.role.findUnique({
@@ -185,24 +190,41 @@ authRoutes.post(
 			return c.json({ error: "author role missing — run db:seed first" }, 500);
 		}
 
-		const user = await prisma.user.create({
-			data: {
-				email,
-				passwordHash,
-				name,
-				username,
-				roles: { create: [{ roleId: authorRole.id }] },
-			},
-			select: {
-				id: true,
-				email: true,
-				username: true,
-				name: true,
-				bio: true,
-				avatarUrl: true,
-				tokenVersion: true,
-			},
-		});
+		// Race-free uniqueness: relying on the DB unique constraint instead of a
+		// findFirst+create pair, which has a window where two parallel requests
+		// both pass the lookup. We catch P2002 (unique violation) and turn it
+		// into a 400 — same UX as the old check, no race.
+		let user;
+		try {
+			user = await prisma.user.create({
+				data: {
+					email,
+					passwordHash,
+					name,
+					username,
+					roles: { create: [{ roleId: authorRole.id }] },
+				},
+				select: {
+					id: true,
+					email: true,
+					username: true,
+					name: true,
+					bio: true,
+					avatarUrl: true,
+					tokenVersion: true,
+				},
+			});
+		} catch (err) {
+			if (
+				err &&
+				typeof err === "object" &&
+				"code" in err &&
+				(err as { code?: string }).code === "P2002"
+			) {
+				return c.json({ error: "Email or username already taken" }, 400);
+			}
+			throw err;
+		}
 
 		const pair = await issueTokenPair({ ...user, mustChangePassword: false }, clientContext(c));
 		setAuthCookies(c, { accessToken: pair.accessToken, refreshToken: pair.refreshToken });
@@ -260,13 +282,23 @@ authRoutes.post("/login", loginRateLimit(), zValidator("json", loginSchema), asy
 	});
 });
 
-// Refresh endpoint: reads refresh token from HttpOnly cookie. No CSRF required
-// because the refresh cookie itself is SameSite=Strict — cross-site requests
-// can't carry it.
+// Refresh endpoint: reads refresh token from HttpOnly cookie. CSRF is enforced
+// here too because in prod cookies are SameSite=None (cross-subdomain SPA), so
+// without the double-submit check a cross-site POST could trigger token
+// rotation and DoS the legitimate session by revoking the previous refresh.
 authRoutes.post(
 	"/refresh",
 	ipRateLimit({ keyPrefix: "refresh", limit: 60, windowSeconds: 60 * 15 }),
 	async (c) => {
+		// Double-submit CSRF: the cookie is sent automatically; the JS-readable
+		// copy must be echoed in the X-CSRF-Token header. A cross-site form has
+		// no way to read the cookie, so it can't replay this header.
+		const csrfHeader = c.req.header(CSRF_HEADER);
+		const csrfCookie = getCsrfCookie(c);
+		if (!csrfTokensMatch(csrfHeader, csrfCookie)) {
+			return c.json({ error: "CSRF token mismatch" }, 403);
+		}
+
 		const refreshToken = getRefreshCookie(c);
 		if (!refreshToken) {
 			return c.json({ error: "Missing refresh token" }, 401);

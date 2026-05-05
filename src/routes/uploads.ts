@@ -1,8 +1,10 @@
 import { Hono } from "hono";
+import sharp from "sharp";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { uploadImage } from "../lib/s3";
 import { ipRateLimit } from "../middleware/rate-limit";
+import { logger } from "../lib/logger";
 
 const uploadLimit = ipRateLimit({ keyPrefix: "upload", limit: 20, windowSeconds: 60 * 15 });
 
@@ -10,12 +12,12 @@ export const uploadsRoutes = new Hono();
 
 const MAX_BYTES = 5 * 1024 * 1024; // 5MB
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
-const EXT_BY_TYPE: Record<string, string> = {
-	"image/jpeg": "jpg",
-	"image/png": "png",
-	"image/webp": "webp",
-	"image/gif": "gif",
-};
+// Cap output width so mobile/desktop never download an oversized hero image.
+// 1200px covers retina mobile (2x of ~600px viewport) and is enough for non-
+// retina desktop hero images at typical layout widths. Smaller LCP than 1600w
+// while still looking sharp on phones, which is where most readers are.
+const MAX_WIDTH = 1200;
+const WEBP_QUALITY = 80;
 
 uploadsRoutes.post(
 	"/image",
@@ -45,15 +47,43 @@ uploadsRoutes.post(
 			return c.json({ error: "File exceeds 5MB limit" }, 400);
 		}
 
-		const ext = EXT_BY_TYPE[file.type];
-		const key = `posts/${user.sub}/${crypto.randomUUID()}.${ext}`;
-		const buffer = Buffer.from(await file.arrayBuffer());
+		const inputBuffer = Buffer.from(await file.arrayBuffer());
+
+		// GIF can be animated; sharp would flatten it to a still frame, so pass
+		// through untouched. Everything else gets resized + re-encoded as WebP
+		// (smaller than JPEG/PNG at equivalent quality, modern-browser support).
+		let outputBuffer: Buffer;
+		let outputContentType: string;
+		let outputExt: string;
+		if (file.type === "image/gif") {
+			outputBuffer = inputBuffer;
+			outputContentType = "image/gif";
+			outputExt = "gif";
+		} else {
+			try {
+				outputBuffer = await sharp(inputBuffer, { failOn: "none" })
+					.rotate() // honor EXIF orientation before resize
+					.resize({ width: MAX_WIDTH, withoutEnlargement: true })
+					.webp({ quality: WEBP_QUALITY })
+					.toBuffer();
+				outputContentType = "image/webp";
+				outputExt = "webp";
+			} catch (err) {
+				logger.error({ err }, "[uploads] sharp transform failed");
+				return c.json({ error: "Image processing failed" }, 400);
+			}
+		}
+
+		const key = `posts/${user.sub}/${crypto.randomUUID()}.${outputExt}`;
 
 		try {
-			const url = await uploadImage({ key, body: buffer, contentType: file.type });
-			return c.json({ url, key, size: file.size, contentType: file.type }, 201);
+			const url = await uploadImage({ key, body: outputBuffer, contentType: outputContentType });
+			return c.json(
+				{ url, key, size: outputBuffer.byteLength, contentType: outputContentType },
+				201,
+			);
 		} catch (err) {
-			console.error("[uploads] S3 put failed", err);
+			logger.error({ err }, "[uploads] s3 put failed");
 			return c.json({ error: "Upload failed" }, 500);
 		}
 	},

@@ -4,7 +4,9 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, type JWTPayload } from "../middleware/auth";
+import { ipRateLimit } from "../middleware/rate-limit";
 import { publishToUser } from "../lib/realtime";
+import { isAllowedMediaUrl } from "../lib/url-allowlist";
 
 export const conversationsRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
@@ -43,10 +45,14 @@ function buildReactions(
 	return Array.from(map.entries()).map(([emoji, v]) => ({ emoji, ...v }));
 }
 
-// Search users to start a conversation with
+// Search users to start a conversation with.
+// `min(2)` keeps single-character queries from cheaply enumerating the userbase
+// one character at a time; the rate limit raises the cost of brute-forcing
+// many short queries.
 conversationsRoutes.get(
 	"/users/search",
-	zValidator("query", z.object({ q: z.string().min(1).max(100) })),
+	ipRateLimit({ keyPrefix: "user-search", limit: 30, windowSeconds: 60 }),
+	zValidator("query", z.object({ q: z.string().min(2).max(100) })),
 	async (c) => {
 		const me = c.get("user");
 		const { q } = c.req.valid("query");
@@ -250,7 +256,11 @@ conversationsRoutes.post(
 		z
 			.object({
 				content: z.string().min(1).max(4000).optional(),
-				imageUrl: z.string().url().optional(),
+				imageUrl: z
+					.string()
+					.url()
+					.refine((u) => isAllowedMediaUrl(u), "imageUrl host not allowed")
+					.optional(),
 				replyToId: z.string().uuid().optional(),
 			})
 			.refine((d) => d.content || d.imageUrl, { message: "content or imageUrl required" }),
@@ -266,7 +276,7 @@ conversationsRoutes.post(
 		if (!participant) return c.json({ error: "Not found" }, 404);
 
 		if (replyToId) {
-			const parent = await prisma.directMessage.findUnique({
+			const parent = await prisma.directMessage.findFirst({
 				where: { id: replyToId, conversationId: convId, deletedAt: null },
 			});
 			if (!parent) return c.json({ error: "Reply target not found" }, 404);
@@ -324,7 +334,7 @@ conversationsRoutes.post(
 		});
 		if (!participant) return c.json({ error: "Not found" }, 404);
 
-		const message = await prisma.directMessage.findUnique({
+		const message = await prisma.directMessage.findFirst({
 			where: { id: msgId, conversationId: convId, deletedAt: null },
 		});
 		if (!message) return c.json({ error: "Message not found" }, 404);
@@ -387,7 +397,7 @@ conversationsRoutes.patch(
 		});
 		if (!participant) return c.json({ error: "Not found" }, 404);
 
-		const message = await prisma.directMessage.findUnique({
+		const message = await prisma.directMessage.findFirst({
 			where: { id: msgId, conversationId: convId, deletedAt: null },
 		});
 		if (!message) return c.json({ error: "Message not found" }, 404);
@@ -434,7 +444,7 @@ conversationsRoutes.delete(
 		});
 		if (!participant) return c.json({ error: "Not found" }, 404);
 
-		const message = await prisma.directMessage.findUnique({
+		const message = await prisma.directMessage.findFirst({
 			where: { id: msgId, conversationId: convId, deletedAt: null },
 		});
 		if (!message) return c.json({ error: "Message not found" }, 404);

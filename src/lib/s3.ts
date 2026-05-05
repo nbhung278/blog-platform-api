@@ -1,4 +1,5 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { logger } from "./logger";
 
 const endpoint = process.env.S3_ENDPOINT;
 const region = process.env.S3_REGION || "us-east-1";
@@ -9,7 +10,7 @@ const forcePathStyle = process.env.S3_FORCE_PATH_STYLE === "true";
 const publicUrl = process.env.S3_PUBLIC_URL || `${endpoint}/${bucket}`;
 
 if (!accessKeyId || !secretAccessKey) {
-	console.warn("[s3] Missing S3_ACCESS_KEY / S3_SECRET_KEY — uploads will fail");
+	logger.warn("[s3] Missing S3_ACCESS_KEY / S3_SECRET_KEY — uploads will fail");
 }
 
 export const s3 = new S3Client({

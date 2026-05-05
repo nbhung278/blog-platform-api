@@ -8,6 +8,8 @@ import { ipRateLimit } from "../middleware/rate-limit";
 import { enqueuePostIndexing } from "../queue";
 import { incrementView, getPendingViews, getPendingViewsMap } from "../lib/view-counter";
 import { notifyFollowersOfPost } from "../lib/notifications";
+import { logger } from "../lib/logger";
+import { isAllowedMediaUrl } from "../lib/url-allowlist";
 
 export const postsRoutes = new Hono();
 
@@ -23,7 +25,12 @@ const createPostSchema = z.object({
 	contentMd: z.string().max(200_000),
 	contentHtml: z.string().max(400_000),
 	excerpt: z.string().max(500).optional(),
-	coverUrl: z.string().url().nullable().optional(),
+	coverUrl: z
+		.string()
+		.url()
+		.refine((u) => isAllowedMediaUrl(u), "coverUrl host not allowed")
+		.nullable()
+		.optional(),
 	status: z.enum(POST_STATUSES).default("draft"),
 	tags: z.array(z.string().max(50)).max(20).default([]),
 	metaTitle: z.string().max(200).optional(),
@@ -36,7 +43,12 @@ const updatePostSchema = z.object({
 	contentMd: z.string().max(200_000).optional(),
 	contentHtml: z.string().max(400_000).optional(),
 	excerpt: z.string().max(500).optional(),
-	coverUrl: z.string().url().nullable().optional(),
+	coverUrl: z
+		.string()
+		.url()
+		.refine((u) => isAllowedMediaUrl(u), "coverUrl host not allowed")
+		.nullable()
+		.optional(),
 	status: z.enum(POST_STATUSES).optional(),
 	tags: z.array(z.string().max(50)).max(20).optional(),
 	metaTitle: z.string().max(200).optional(),
@@ -325,7 +337,9 @@ postsRoutes.get(
 		}
 
 		// Increment first, then read pending — guarantees the current view is reflected.
-		await incrementView(post.id).catch((err) => console.error("[view] increment failed:", err));
+		await incrementView(post.id).catch((err) =>
+			logger.error({ err, postId: post.id }, "[view] increment failed"),
+		);
 		const pending = await getPendingViews(post.id);
 
 		return c.json({ ...post, viewCount: post.viewCount + pending });

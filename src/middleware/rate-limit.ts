@@ -49,6 +49,32 @@ export function ipRateLimit({ keyPrefix, limit, windowSeconds, keyExtractor }: O
 	});
 }
 
+// Per-user rate limit. Use after `authMiddleware` so `c.get("user").sub` is
+// populated. Anonymous fallthrough returns 401 — never silently un-limited.
+// Stack with ipRateLimit when you also want to throttle pre-auth abuse.
+export function userRateLimit({ keyPrefix, limit, windowSeconds }: Omit<Options, "keyExtractor">) {
+	return createMiddleware(async (c, next) => {
+		const user = c.get("user") as { sub?: string } | undefined;
+		if (!user?.sub) {
+			return c.json({ error: "Unauthorized" }, 401);
+		}
+		const key = `ratelimit:${keyPrefix}:user:${user.sub}`;
+
+		const count = await redis.incr(key);
+		if (count === 1) {
+			await redis.expire(key, windowSeconds);
+		}
+
+		if (count > limit) {
+			const ttl = await redis.ttl(key);
+			c.header("Retry-After", String(ttl));
+			return c.json({ error: "Quota exceeded", retryAfter: ttl }, 429);
+		}
+
+		await next();
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Login rate limiter — two layers + exponential backoff.
 //

@@ -4,6 +4,7 @@ import { verify } from "hono/jwt";
 import type { PermissionKey } from "../lib/permissions";
 import { getCachedTokenVersion } from "../lib/tokens";
 import { CSRF_HEADER, csrfTokensMatch, getAccessCookie, getCsrfCookie } from "../lib/cookies";
+import { env } from "../lib/env";
 
 export type JWTPayload = {
 	sub: string;
@@ -58,7 +59,7 @@ export const authMiddleware = createMiddleware<{
 	}
 
 	try {
-		const payload = (await verify(token, process.env.JWT_SECRET!, "HS256")) as JWTPayload;
+		const payload = (await verify(token, env.JWT_SECRET, "HS256")) as JWTPayload;
 
 		// Reject tokens issued before RBAC was introduced (missing fields).
 		// Forces clients to re-login to get a token with roles/permissions.
@@ -93,7 +94,7 @@ export async function tryGetUser(c: Context): Promise<JWTPayload | null> {
 	const token = extractAccessToken(c);
 	if (!token) return null;
 	try {
-		const payload = (await verify(token, process.env.JWT_SECRET!, "HS256")) as JWTPayload;
+		const payload = (await verify(token, env.JWT_SECRET, "HS256")) as JWTPayload;
 		if (!Array.isArray(payload.permissions) || !Array.isArray(payload.roles)) return null;
 		if (typeof payload.tokenVersion !== "number") return null;
 		const currentVersion = await getCachedTokenVersion(payload.sub);

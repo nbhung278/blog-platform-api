@@ -5,7 +5,7 @@ import { hash } from "bcrypt";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission, type JWTPayload } from "../middleware/auth";
-import { PERMISSIONS } from "../lib/permissions";
+import { PERMISSIONS, ROLE_KEYS } from "../lib/permissions";
 import { bumpTokenVersion } from "../lib/tokens";
 
 export const usersRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
@@ -93,11 +93,38 @@ usersRoutes.post("/", zValidator("json", createUserSchema), async (c) => {
 });
 
 usersRoutes.patch("/:id", zValidator("json", updateUserSchema), async (c) => {
+	const me = c.get("user");
 	const id = c.req.param("id");
 	const body = c.req.valid("json");
 
 	const existing = await prisma.user.findUnique({ where: { id } });
 	if (!existing) return c.json({ error: "User not found" }, 404);
+
+	// Hardening against privilege escalation by users with USER_MANAGE who
+	// aren't super_admin themselves:
+	//  - they can't edit their own roles (so they can't escalate themselves)
+	//  - they can't grant or strip the super_admin role to anyone
+	const callerIsSuperAdmin = me.roles.includes(ROLE_KEYS.SUPER_ADMIN);
+	if (body.roleIds && !callerIsSuperAdmin) {
+		if (id === me.sub) {
+			return c.json({ error: "You cannot change your own roles" }, 403);
+		}
+		const requestedRoles = await prisma.role.findMany({
+			where: { id: { in: body.roleIds } },
+			select: { key: true },
+		});
+		const wouldGrantSuperAdmin = requestedRoles.some((r) => r.key === ROLE_KEYS.SUPER_ADMIN);
+		const targetCurrentRoles = await prisma.userRole.findMany({
+			where: { userId: id },
+			select: { role: { select: { key: true } } },
+		});
+		const targetIsSuperAdmin = targetCurrentRoles.some(
+			(ur) => ur.role.key === ROLE_KEYS.SUPER_ADMIN,
+		);
+		if (wouldGrantSuperAdmin || targetIsSuperAdmin) {
+			return c.json({ error: "Only a super_admin can assign or modify the super_admin role" }, 403);
+		}
+	}
 
 	const data: Record<string, unknown> = {};
 	if (body.email) data.email = body.email;
@@ -111,19 +138,33 @@ usersRoutes.patch("/:id", zValidator("json", updateUserSchema), async (c) => {
 	const rolesChanged = !!body.roleIds;
 	const passwordChanged = !!body.password;
 
-	await prisma.$transaction(async (tx) => {
-		if (Object.keys(data).length > 0) {
-			await tx.user.update({ where: { id }, data });
-		}
-		if (body.roleIds) {
-			await tx.userRole.deleteMany({ where: { userId: id } });
-			if (body.roleIds.length > 0) {
-				await tx.userRole.createMany({
-					data: body.roleIds.map((roleId) => ({ userId: id, roleId })),
-				});
+	try {
+		await prisma.$transaction(async (tx) => {
+			if (Object.keys(data).length > 0) {
+				await tx.user.update({ where: { id }, data });
 			}
+			if (body.roleIds) {
+				await tx.userRole.deleteMany({ where: { userId: id } });
+				if (body.roleIds.length > 0) {
+					await tx.userRole.createMany({
+						data: body.roleIds.map((roleId) => ({ userId: id, roleId })),
+					});
+				}
+			}
+		});
+	} catch (err) {
+		// Translate the unique-constraint violation into a clean 409 instead of
+		// bubbling up as a 500.
+		if (
+			err &&
+			typeof err === "object" &&
+			"code" in err &&
+			(err as { code?: string }).code === "P2002"
+		) {
+			return c.json({ error: "Email or username already taken" }, 409);
 		}
-	});
+		throw err;
+	}
 
 	// Force re-login if roles or password changed — JWT carries cached
 	// permissions, so bumping the version invalidates outstanding tokens.
