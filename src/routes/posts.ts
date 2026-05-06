@@ -10,6 +10,7 @@ import { incrementView, getPendingViews, getPendingViewsMap } from "../lib/view-
 import { notifyFollowersOfPost } from "../lib/notifications";
 import { logger } from "../lib/logger";
 import { isAllowedMediaUrl } from "../lib/url-allowlist";
+import { deleteObject, extractOwnedS3Key } from "../lib/s3";
 
 export const postsRoutes = new Hono();
 
@@ -175,7 +176,7 @@ postsRoutes.post(
 		// Fetch all posts to check ownership
 		const posts = await prisma.post.findMany({
 			where: { id: { in: ids }, deletedAt: null },
-			select: { id: true, userId: true },
+			select: { id: true, userId: true, coverUrl: true },
 		});
 
 		// Determine which posts the caller may actually delete. If they can only
@@ -183,24 +184,35 @@ postsRoutes.post(
 		// present — mixing allowed/forbidden in a bulk op is treated as caller
 		// error rather than partial-success, so behavior matches the existing
 		// API contract.
-		const targetIds = canDeleteAny ? posts.map((p) => p.id) : [];
+		const targets = canDeleteAny ? posts : [];
 		if (!canDeleteAny) {
 			const forbidden = posts.filter((p) => p.userId !== user.sub);
 			if (forbidden.length > 0) {
 				return c.json({ error: "Forbidden: you do not own some of these posts" }, 403);
 			}
-			targetIds.push(...posts.filter((p) => p.userId === user.sub).map((p) => p.id));
+			targets.push(...posts.filter((p) => p.userId === user.sub));
 		}
 
-		if (targetIds.length === 0) {
+		if (targets.length === 0) {
 			return c.json({ deleted: 0 });
 		}
 
+		const targetIds = targets.map((p) => p.id);
 		const now = new Date();
 		const result = await prisma.post.updateMany({
 			where: { id: { in: targetIds }, deletedAt: null },
 			data: { deletedAt: now },
 		});
+
+		// Fire-and-forget S3 cleanup. Each post's cover is only deleted if the
+		// key lives under that author's prefix — refuses to wipe a file the
+		// post's owner doesn't actually own (eg coverUrl pointed at someone
+		// else's image).
+		for (const p of targets) {
+			const key = extractOwnedS3Key(p.coverUrl, p.userId);
+			if (key) void deleteObject(key);
+		}
+
 		return c.json({ deleted: result.count });
 	},
 );
@@ -442,7 +454,14 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 
 	const existing = await prisma.post.findUnique({
 		where: { id: postId },
-		select: { version: true, userId: true, status: true, publishedAt: true, deletedAt: true },
+		select: {
+			version: true,
+			userId: true,
+			status: true,
+			publishedAt: true,
+			deletedAt: true,
+			coverUrl: true,
+		},
 	});
 
 	if (!existing || existing.deletedAt) {
@@ -508,6 +527,18 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 		await notifyFollowersOfPost(existing.userId, postId, "post_updated");
 	}
 
+	// Cover replaced or cleared → free the old object. Compare by key (not URL)
+	// so a no-op rehost that returns the same key doesn't trigger a delete of
+	// the file we just kept. Ownership-scoped extractor refuses to return a
+	// key that doesn't live under the post owner's prefix — prevents a hostile
+	// PATCH where coverUrl points at someone else's file from triggering its
+	// deletion on the next update.
+	if (updates.coverUrl !== undefined) {
+		const oldKey = extractOwnedS3Key(existing.coverUrl, existing.userId);
+		const newKey = extractOwnedS3Key(updates.coverUrl, existing.userId);
+		if (oldKey && oldKey !== newKey) void deleteObject(oldKey);
+	}
+
 	return c.json(updated);
 });
 
@@ -518,7 +549,7 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 
 	const existing = await prisma.post.findUnique({
 		where: { id: postId },
-		select: { userId: true, deletedAt: true },
+		select: { userId: true, deletedAt: true, coverUrl: true },
 	});
 
 	if (!existing || existing.deletedAt) {
@@ -534,5 +565,14 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 	}
 
 	await prisma.post.update({ where: { id: postId }, data: { deletedAt: new Date() } });
+
+	// Free the cover from S3. Soft-delete keeps the row for audit/restore, but
+	// the file is dead weight either way and storage adds up. If we add a
+	// restore endpoint later, drop this and sweep on hard-delete instead.
+	// Ownership-scoped: refuses to delete a key whose path doesn't match the
+	// post owner — defends against coverUrl pointing at someone else's file.
+	const key = extractOwnedS3Key(existing.coverUrl, existing.userId);
+	if (key) void deleteObject(key);
+
 	return c.json({ success: true });
 });
