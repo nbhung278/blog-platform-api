@@ -18,6 +18,13 @@ function buildAllowedHosts(): Set<string> {
 			// ignore — env validator already checked the format
 		}
 	}
+	if (env.CDN_PUBLIC_URL) {
+		try {
+			hosts.add(new URL(env.CDN_PUBLIC_URL).hostname.toLowerCase());
+		} catch {
+			// ignore
+		}
+	}
 	// Fall back to the bare bucket hostname pattern so dev (with only
 	// S3_BUCKET set) still works.
 	if (env.S3_BUCKET && env.S3_REGION) {

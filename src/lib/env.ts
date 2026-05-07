@@ -34,6 +34,11 @@ const EnvSchema = z.object({
 		.optional()
 		.transform((v) => v === "true"),
 
+	// CDN in front of S3 (e.g. CloudFront). When set, newly uploaded images are
+	// served via this URL instead of the raw S3 endpoint. The S3 hostname stays
+	// allowlisted so historical URLs continue to validate after migration.
+	CDN_PUBLIC_URL: z.string().url().optional(),
+
 	// One-shot install token: when set, /api/auth/setup requires the caller to
 	// echo this value via the X-Setup-Token header. Lets you keep the endpoint
 	// reachable for bootstrapping without leaving it open to whoever races the

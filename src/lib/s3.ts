@@ -7,7 +7,11 @@ const bucket = process.env.S3_BUCKET || "blog-media";
 const accessKeyId = process.env.S3_ACCESS_KEY;
 const secretAccessKey = process.env.S3_SECRET_KEY;
 const forcePathStyle = process.env.S3_FORCE_PATH_STYLE === "true";
-const publicUrl = process.env.S3_PUBLIC_URL || `${endpoint}/${bucket}`;
+const s3Url = process.env.S3_PUBLIC_URL || `${endpoint}/${bucket}`;
+// Prefer CDN for newly issued URLs; fall back to direct S3 when not configured.
+// Both prefixes are accepted as "ours" by extractOwnedS3Key so legacy S3 URLs
+// keep working until the migration script rewrites them.
+const publicUrl = process.env.CDN_PUBLIC_URL || s3Url;
 
 if (!accessKeyId || !secretAccessKey) {
 	logger.warn("[s3] Missing S3_ACCESS_KEY / S3_SECRET_KEY — uploads will fail");
@@ -25,6 +29,9 @@ export const s3 = new S3Client({
 
 export const S3_BUCKET = bucket;
 export const S3_PUBLIC_URL = publicUrl.replace(/\/$/, "");
+// Direct S3 URL prefix — kept around so we can still recognize and clean up
+// legacy objects whose stored URL points at the bucket directly.
+const S3_DIRECT_URL = s3Url.replace(/\/$/, "");
 
 export async function uploadImage(args: {
 	key: string;
@@ -72,9 +79,16 @@ export async function deleteObject(key: string): Promise<void> {
  */
 export function extractOwnedS3Key(url: string | null | undefined, ownerId: string): string | null {
 	if (!url) return null;
-	const prefix = `${S3_PUBLIC_URL}/`;
-	if (!url.startsWith(prefix)) return null;
-	const key = url.slice(prefix.length);
+	// Accept either the CDN prefix (new URLs) or the bare S3 prefix (legacy URLs
+	// uploaded before CloudFront was wired up). Either way the key after the
+	// host is the same S3 object key.
+	const prefixes =
+		S3_PUBLIC_URL === S3_DIRECT_URL
+			? [`${S3_PUBLIC_URL}/`]
+			: [`${S3_PUBLIC_URL}/`, `${S3_DIRECT_URL}/`];
+	const matched = prefixes.find((p) => url.startsWith(p));
+	if (!matched) return null;
+	const key = url.slice(matched.length);
 	if (key.length === 0) return null;
 	// Key shape from /api/uploads/image is `posts/{userSub}/{uuid}.{ext}`.
 	// Reject anything that isn't in this user's directory — that's an attempt
