@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, requireAnyPermission, tryGetUser } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
@@ -262,15 +263,139 @@ postsRoutes.get(
 	},
 );
 
-// Public: search posts by text query OR filter by category slug
+// Public: top posts by all-time view count (homepage "Most viewed" rail).
+postsRoutes.get(
+	"/most-viewed",
+	ipRateLimit({ keyPrefix: "posts-popular", limit: 60, windowSeconds: 60 }),
+	async (c) => {
+		c.header("Cache-Control", "public, s-maxage=120, stale-while-revalidate=300");
+		const limit = Math.min(Math.max(Number(c.req.query("limit")) || 4, 1), 12);
+
+		const posts = await prisma.post.findMany({
+			where: { status: "published", deletedAt: null },
+			orderBy: [{ viewCount: "desc" }, { publishedAt: "desc" }, { id: "desc" }],
+			take: limit,
+			select: POST_LIST_SELECT,
+		});
+
+		return c.json({ items: await withPendingViews(posts) });
+	},
+);
+
+// Public: published posts grouped by category (homepage sections).
+// `sort=popular` (default) ranks posts by viewCount; `sort=recent` falls back to
+// publishedAt for chronological browsing.
+//
+// Implemented as two queries:
+//   1) raw SQL with ROW_NUMBER() to pick the top `perCategory` post IDs per
+//      category in a single pass, ranked by the requested order;
+//   2) Prisma findMany on those IDs to load the relation-rich POST_LIST_SELECT
+//      shape (author + categories) that the homepage renders.
+// The naive shape — one findMany per category — was an N+1 that scaled with
+// `maxCategories`; the window-function form is constant-query regardless.
+postsRoutes.get(
+	"/by-categories",
+	ipRateLimit({ keyPrefix: "posts-by-cats", limit: 60, windowSeconds: 60 }),
+	async (c) => {
+		c.header("Cache-Control", "public, s-maxage=60, stale-while-revalidate=120");
+		const perCategory = Math.min(Math.max(Number(c.req.query("perCategory")) || 4, 1), 8);
+		const maxCategories = Math.min(Math.max(Number(c.req.query("maxCategories")) || 6, 1), 12);
+		const sort = c.req.query("sort") === "recent" ? "recent" : "popular";
+
+		// Both branches tie-break on (published_at desc, id desc) so the order is
+		// total — without the id tiebreaker, posts published in the same second
+		// could swap positions between requests and break pagination assumptions
+		// downstream.
+		const rankExpr = Prisma.raw(
+			sort === "popular"
+				? "ROW_NUMBER() OVER (PARTITION BY pc.category_id ORDER BY p.view_count DESC, p.published_at DESC, p.id DESC)"
+				: "ROW_NUMBER() OVER (PARTITION BY pc.category_id ORDER BY p.published_at DESC, p.id DESC)",
+		);
+
+		const ranked = await prisma.$queryRaw<
+			{ post_id: string; category_id: string; category_name: string; category_slug: string }[]
+		>`
+			SELECT post_id, category_id, category_name, category_slug FROM (
+				SELECT
+					p.id AS post_id,
+					c.id AS category_id,
+					c.name AS category_name,
+					c.slug AS category_slug,
+					${rankExpr} AS rn
+				FROM posts p
+				JOIN post_categories pc ON pc.post_id = p.id
+				JOIN categories c ON c.id = pc.category_id
+				WHERE p.status = 'published' AND p.deleted_at IS NULL
+			) t
+			WHERE rn <= ${perCategory}
+			ORDER BY category_name ASC, rn ASC
+			LIMIT ${perCategory * maxCategories}
+		`;
+
+		if (ranked.length === 0) return c.json({ sections: [] });
+
+		// Distinct categories in deterministic name order, capped at maxCategories.
+		// We can't push maxCategories into SQL easily without another window pass,
+		// so trim here — perCategory * maxCategories rows is small (≤ 96 default).
+		const categoryOrder: { id: string; name: string; slug: string }[] = [];
+		const seenCategories = new Set<string>();
+		for (const r of ranked) {
+			if (!seenCategories.has(r.category_id)) {
+				seenCategories.add(r.category_id);
+				if (categoryOrder.length < maxCategories) {
+					categoryOrder.push({ id: r.category_id, name: r.category_name, slug: r.category_slug });
+				}
+			}
+		}
+		const allowedCategories = new Set(categoryOrder.map((c) => c.id));
+		const trimmed = ranked.filter((r) => allowedCategories.has(r.category_id));
+		const postIds = [...new Set(trimmed.map((r) => r.post_id))];
+
+		const posts = await prisma.post.findMany({
+			where: { id: { in: postIds } },
+			select: POST_LIST_SELECT,
+		});
+		const hydrated = await withPendingViews(posts);
+		const postById = new Map(hydrated.map((p) => [p.id, p]));
+
+		const sections = categoryOrder
+			.map((cat) => ({
+				category: cat,
+				posts: trimmed
+					.filter((r) => r.category_id === cat.id)
+					.map((r) => postById.get(r.post_id))
+					.filter((p): p is NonNullable<typeof p> => p !== undefined),
+			}))
+			.filter((s) => s.posts.length > 0);
+
+		return c.json({ sections });
+	},
+);
+
+// Public: search posts by text query OR filter by category slug.
+// Search requires q.length >= 3 to avoid scanning the whole table on noisy
+// queries like "a"; category browse has no such floor.
+const MIN_SEARCH_QUERY_LENGTH = 3;
+
 postsRoutes.get(
 	"/search",
 	ipRateLimit({ keyPrefix: "post-search", limit: 30, windowSeconds: 60 }),
 	async (c) => {
 		const q = (c.req.query("q") ?? "").trim().slice(0, 200);
 		const categorySlug = (c.req.query("category") ?? "").trim().slice(0, 100);
+		const page = Math.max(Number(c.req.query("page")) || 1, 1);
+		const limit = Math.min(Math.max(Number(c.req.query("limit")) || 12, 1), 50);
 
-		if (!q && !categorySlug) return c.json({ items: [], total: 0 });
+		if (!q && !categorySlug) {
+			return c.json({ items: [], total: 0, page, limit, totalPages: 0 });
+		}
+
+		if (q && !categorySlug && q.length < MIN_SEARCH_QUERY_LENGTH) {
+			return c.json(
+				{ error: `Search query must be at least ${MIN_SEARCH_QUERY_LENGTH} characters` },
+				400,
+			);
+		}
 
 		const where = categorySlug
 			? {
@@ -289,15 +414,25 @@ postsRoutes.get(
 					],
 				};
 
-		const result = await prisma.post.findMany({
-			where,
-			orderBy: { publishedAt: "desc" },
-			take: 50,
-			select: POST_LIST_SELECT,
-		});
+		const [total, result] = await Promise.all([
+			prisma.post.count({ where }),
+			prisma.post.findMany({
+				where,
+				orderBy: [{ publishedAt: "desc" }, { id: "desc" }],
+				skip: (page - 1) * limit,
+				take: limit,
+				select: POST_LIST_SELECT,
+			}),
+		]);
 
 		const items = await withPendingViews(result);
-		return c.json({ items, total: items.length });
+		return c.json({
+			items,
+			total,
+			page,
+			limit,
+			totalPages: Math.ceil(total / limit),
+		});
 	},
 );
 

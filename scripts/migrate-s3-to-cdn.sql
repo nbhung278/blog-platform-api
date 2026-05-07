@@ -49,7 +49,7 @@ SET content_html = REPLACE(
 WHERE content_html LIKE '%https://strix-blog-media.s3.ap-southeast-1.amazonaws.com%';
 
 -- 4) Chat message attachments
-UPDATE chat_messages
+UPDATE direct_messages
 SET image_url = REPLACE(
     image_url,
     'https://strix-blog-media.s3.ap-southeast-1.amazonaws.com',
@@ -67,6 +67,6 @@ SELECT 'posts.og_image_url',       COUNT(*)              FROM posts         WHER
 UNION ALL
 SELECT 'posts.content_html',       COUNT(*)              FROM posts         WHERE content_html LIKE '%strix-blog-media.s3.%'
 UNION ALL
-SELECT 'chat_messages.image_url',  COUNT(*)              FROM chat_messages WHERE image_url    LIKE 'https://strix-blog-media.s3.%';
+SELECT 'direct_messages.image_url',  COUNT(*)              FROM direct_messages WHERE image_url    LIKE 'https://strix-blog-media.s3.%';
 
 COMMIT;
