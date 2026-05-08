@@ -18,6 +18,7 @@ import { clapsRoutes } from "./routes/claps";
 import { bookmarksRoutes } from "./routes/bookmarks";
 import { commentsRoutes } from "./routes/comments";
 import { conversationsRoutes } from "./routes/conversations";
+import { shareRoutes } from "./routes/share";
 import { startWorkers, stopWorkers } from "./queue";
 import { startViewCountFlusher, stopViewCountFlusher, flushViewCounts } from "./lib/view-counter";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
@@ -55,7 +56,6 @@ app.use(
 app.use("*", async (c, next) => {
 	await next();
 	c.header("X-Content-Type-Options", "nosniff");
-	c.header("X-Frame-Options", "DENY");
 	c.header("Referrer-Policy", "no-referrer");
 	c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
 	// API is consumed by SPAs hosted on a different origin, so resources must be
@@ -67,6 +67,15 @@ app.use("*", async (c, next) => {
 	if (proto === "https") {
 		c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
 	}
+
+	// /share/* serves HTML to social crawlers and humans, with an inline
+	// redirect script. The default API CSP (default-src 'none') would block
+	// that script and unfurls would still work but humans wouldn't redirect.
+	// X-Frame-Options:DENY is also relaxed because some crawlers preview in
+	// iframes; the page is a static redirect so clickjacking doesn't apply.
+	if (c.req.path.startsWith("/share/")) return;
+
+	c.header("X-Frame-Options", "DENY");
 	c.header(
 		"Content-Security-Policy",
 		["default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"].join("; "),
@@ -87,6 +96,9 @@ app.route("/api/claps", clapsRoutes);
 app.route("/api/bookmarks", bookmarksRoutes);
 app.route("/api/comments", commentsRoutes);
 app.route("/api/conversations", conversationsRoutes);
+// Public OG-tag / unfurl route. Lives outside /api/* so the share URLs are
+// short and obviously not a JSON endpoint.
+app.route("/share", shareRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 

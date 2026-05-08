@@ -22,6 +22,10 @@ export const postsRoutes = new Hono();
 const POST_STATUSES = ["draft", "pending", "published", "rejected"] as const;
 type PostStatus = (typeof POST_STATUSES)[number];
 
+// Cap categories per post to keep listings focused and discourage tag-spam
+// across every section. Mirrored in the frontend and admin editors.
+const MAX_CATEGORIES_PER_POST = 3;
+
 const createPostSchema = z.object({
 	title: z.string().min(1).max(200),
 	contentMd: z.string().max(200_000),
@@ -37,7 +41,10 @@ const createPostSchema = z.object({
 	tags: z.array(z.string().max(50)).max(20).default([]),
 	metaTitle: z.string().max(200).optional(),
 	metaDesc: z.string().max(500).optional(),
-	categoryIds: z.array(z.string().uuid()).min(1, "At least one category is required"),
+	categoryIds: z
+		.array(z.string().uuid())
+		.min(1, "At least one category is required")
+		.max(MAX_CATEGORIES_PER_POST, `At most ${MAX_CATEGORIES_PER_POST} categories are allowed`),
 });
 
 const updatePostSchema = z.object({
@@ -56,7 +63,11 @@ const updatePostSchema = z.object({
 	metaTitle: z.string().max(200).optional(),
 	metaDesc: z.string().max(500).optional(),
 	version: z.number().int(),
-	categoryIds: z.array(z.string().uuid()).min(1, "At least one category is required").optional(),
+	categoryIds: z
+		.array(z.string().uuid())
+		.min(1, "At least one category is required")
+		.max(MAX_CATEGORIES_PER_POST, `At most ${MAX_CATEGORIES_PER_POST} categories are allowed`)
+		.optional(),
 });
 
 function slugify(title: string): string {
