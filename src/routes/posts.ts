@@ -487,6 +487,10 @@ postsRoutes.get(
 
 		const post = await prisma.post.findFirst({
 			where: { slug, status: "published", deletedAt: null },
+			include: {
+				user: { select: { id: true, name: true, username: true, avatarUrl: true } },
+				categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
+			},
 		});
 
 		if (!post) {
