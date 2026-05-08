@@ -21,8 +21,6 @@ model User {
   updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
 
   posts                  Post[]
-  postChunks             PostChunk[]
-  chatSessions           ChatSession[]
   comments               Comment[]
   roles                  UserRole[]
   refreshTokens          RefreshToken[]
@@ -160,7 +158,6 @@ model Post {
   deletedAt   DateTime? @map("deleted_at")
 
   user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  postChunks      PostChunk[]
   analyticsEvents AnalyticsEvent[]
   comments        Comment[]
   categories      PostCategory[]
@@ -206,22 +203,6 @@ model PostBookmark {
   @@map("post_bookmarks")
 }
 
-model PostChunk {
-  id        String   @id @default(uuid()) @db.Uuid
-  postId    String   @map("post_id") @db.Uuid
-  userId    String   @map("user_id") @db.Uuid
-  chunkIdx  Int      @map("chunk_idx")
-  heading   String?
-  content   String
-  // embedding vector(1536) managed via raw SQL (Prisma doesn't support pgvector natively)
-  createdAt DateTime @default(now()) @map("created_at")
-
-  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("post_chunks")
-}
-
 model AnalyticsEvent {
   id        String   @id @default(uuid()) @db.Uuid
   postId    String?  @map("post_id") @db.Uuid
@@ -235,18 +216,6 @@ model AnalyticsEvent {
   @@index([postId, event])
   @@index([createdAt(sort: Desc)])
   @@map("analytics_events")
-}
-
-model ChatSession {
-  id        String   @id @default(uuid()) @db.Uuid
-  userId    String   @map("user_id") @db.Uuid
-  messages  Json     @default("[]")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@map("chat_sessions")
 }
 
 model Comment {

@@ -6,7 +6,6 @@ import { prisma } from "../db";
 import { authMiddleware, requireAnyPermission, tryGetUser } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { ipRateLimit } from "../middleware/rate-limit";
-import { enqueuePostIndexing } from "../queue";
 import { incrementView, getPendingViews, getPendingViewsMap } from "../lib/view-counter";
 import { notifyFollowersOfPost } from "../lib/notifications";
 import { logger } from "../lib/logger";
@@ -582,8 +581,6 @@ postsRoutes.post(
 			},
 		});
 
-		await enqueuePostIndexing(post.id, user.sub);
-
 		if (post.status === "published") {
 			await notifyFollowersOfPost(user.sub, post.id, "post_published");
 		}
@@ -662,10 +659,6 @@ postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), 
 			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
 		},
 	});
-
-	if (updates.contentMd) {
-		await enqueuePostIndexing(postId, existing.userId);
-	}
 
 	if (isFirstPublish) {
 		await notifyFollowersOfPost(existing.userId, postId, "post_published");

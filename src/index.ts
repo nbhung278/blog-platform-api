@@ -7,7 +7,6 @@ import { bodyLimit } from "hono/body-limit";
 import { authRoutes } from "./routes/auth";
 import { postsRoutes } from "./routes/posts";
 import { categoriesRoutes } from "./routes/categories";
-import { aiRoutes } from "./routes/ai";
 import { analyticsRoutes } from "./routes/analytics";
 import { usersRoutes } from "./routes/users";
 import { rolesRoutes } from "./routes/roles";
@@ -19,7 +18,6 @@ import { bookmarksRoutes } from "./routes/bookmarks";
 import { commentsRoutes } from "./routes/comments";
 import { conversationsRoutes } from "./routes/conversations";
 import { shareRoutes } from "./routes/share";
-import { startWorkers, stopWorkers } from "./queue";
 import { startViewCountFlusher, stopViewCountFlusher, flushViewCounts } from "./lib/view-counter";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
 import { prisma } from "./db";
@@ -85,7 +83,6 @@ app.use("*", async (c, next) => {
 app.route("/api/auth", authRoutes);
 app.route("/api/posts", postsRoutes);
 app.route("/api/categories", categoriesRoutes);
-app.route("/api/ai", aiRoutes);
 app.route("/api/analytics", analyticsRoutes);
 app.route("/api/users", usersRoutes);
 app.route("/api/roles", rolesRoutes);
@@ -114,7 +111,6 @@ app.onError((err, c) => {
 });
 
 // Start background workers
-startWorkers();
 startViewCountFlusher();
 
 const port = env.PORT;
@@ -158,7 +154,7 @@ const server = Bun.serve<WSData, never>({
 
 logger.info({ url: `http://localhost:${server.port}` }, "[server] listening");
 
-// Graceful shutdown — drain queue + flush view counter + close infra so a
+// Graceful shutdown — flush view counter + close infra so a
 // container restart doesn't lose in-flight work or corrupt counters.
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -176,13 +172,6 @@ async function shutdown(signal: string): Promise<void> {
 		await flushViewCounts();
 	} catch (err) {
 		logger.error({ err }, "[server] final flushViewCounts failed");
-	}
-
-	// Drain BullMQ worker — waits for in-flight jobs up to the worker's grace.
-	try {
-		await stopWorkers();
-	} catch (err) {
-		logger.error({ err }, "[server] stopWorkers failed");
 	}
 
 	// Release database + Redis handles.
