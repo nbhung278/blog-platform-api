@@ -5,12 +5,11 @@ API server for the Strix blog platform. Powers the public client and the admin p
 ## Stack
 
 - **Bun** runtime + **Hono** HTTP framework
-- **PostgreSQL** with **pgvector** (embeddings for RAG chat)
-- **Redis** — token version cache, view-counter buffer, BullMQ job queue
-- **Prisma 7** ORM
-- **MinIO / S3** for image uploads
-- **Anthropic / OpenAI** SDK for AI chat
-- WebSocket server (Bun native) for realtime notifications
+- **PostgreSQL** + **Prisma 7** ORM
+- **Redis** — token version cache, view-counter buffer, rate-limit counters
+- **S3-compatible storage** (MinIO local, AWS S3 prod) for image uploads with **sharp** for resize/WebP
+- **Nginx** (Docker) reverse proxy with gzip — fronts Bun in production
+- WebSocket server (Bun native) for realtime notifications and direct messages
 
 ## Features
 
@@ -20,16 +19,17 @@ API server for the Strix blog platform. Powers the public client and the admin p
 - Rate limiting (login throttle, IP-based per-route limits)
 - Posts: draft → pending → published → rejected workflow with version-based optimistic locking
 - Categories, tags, search (title / content / tag / author)
-- AI chat over post embeddings (RAG with pgvector)
+- Image upload pipeline: validate magic bytes → sharp resize (max 1200px, EXIF rotate) → WebP convert → S3 upload
 - View counter (Redis buffer flushed every 30s to avoid write-amplification)
 - Follow / unfollow with email-notification toggle
-- Notifications (follow + post publish + post update) fanned out over WebSocket
+- Notifications fanned out over WebSocket
+- Direct messaging (1:1 conversations) with reactions + edit + delete
+- CDN cache: 5 public endpoints cached at Cloudflare edge (see `ROADMAP.md`)
 
 ## Prerequisites
 
-- [Bun](https://bun.sh/) ≥ 1.0
-- Docker (for local Postgres/Redis/MinIO via `docker-compose`)
-- An Anthropic or OpenAI API key
+- [Bun](https://bun.sh/) ≥ 1.2
+- Docker (for local Postgres / Redis / MinIO via `docker-compose`)
 
 ## Setup
 
@@ -39,7 +39,7 @@ bun install
 
 # Copy env and fill in secrets
 cp .env.example .env
-# Edit .env — at minimum set JWT_SECRET, ANTHROPIC_API_KEY (or OPENAI_API_KEY)
+# Edit .env — at minimum set JWT_SECRET (32+ chars)
 
 # Boot local infra (Postgres + Redis + MinIO)
 docker-compose up -d
@@ -73,6 +73,7 @@ Server listens on `http://localhost:3000` by default.
 - **Token revocation**: every user has a `tokenVersion`. Bumping it (logout-all, password change) invalidates every issued JWT immediately, even un-expired ones.
 - **WebSocket**: `/ws` upgrades verify the access cookie + check `tokenVersion`, enforce origin allowlist, and cap connections per user. Logout / password change actively disconnect open sockets via `disconnectUser()`.
 - **CSP**: backend only emits JSON, but a strict CSP is set as defense-in-depth.
+- **Cache headers**: public read endpoints emit `Cache-Control: public, s-maxage=...` so Cloudflare can cache at the edge. See `ROADMAP.md` for the cache rule + endpoint TTLs.
 
 ## Project layout
 
@@ -90,16 +91,21 @@ src/
     realtime.ts         # in-memory subscriber map + publishToUser
     ws.ts               # WebSocket auth + handlers
     permissions.ts      # PermissionKey constants
+    s3.ts               # S3 upload helpers
+    view-counter.ts     # Redis buffer + periodic flush to Postgres
   routes/
     auth.ts             # login/register/logout/me/change-password
     posts.ts            # CRUD + feed + search
     follows.ts          # follow/unfollow/email-toggle
     notifications.ts    # list/mark-read/unread-count
-    categories.ts roles.ts users.ts uploads.ts ai.ts analytics.ts
+    conversations.ts    # direct messages 1:1
+    bookmarks.ts claps.ts comments.ts
+    categories.ts roles.ts users.ts uploads.ts analytics.ts share.ts
 prisma/
   schema.prisma         # source of truth for the DB
   migrations/           # generated migration history
   seed.ts               # roles + permissions seed
+nginx/                  # prod reverse proxy config (mounted into nginx container)
 ```
 
 ## Environment variables
@@ -109,15 +115,20 @@ See `.env.example`. Notable:
 - `JWT_SECRET` — must be 32+ random bytes in production
 - `APP_URL` / `ADMIN_URL` — added to CORS allowlist and WebSocket origin allowlist; must match exactly (including protocol)
 - `ALLOW_REGISTRATION` — flip to `false` to lock down public sign-up
-- `LLM_PROVIDER` — `anthropic` or `openai`
+- `S3_*` — bucket, region, access key, secret, public URL (or CDN)
 
 ## Deploying
 
 In production:
 
 - Set `NODE_ENV=production` (cookies become `Secure`)
-- Use a reverse proxy (Nginx/Cloudflare) — terminate TLS there, forward `Host` and `X-Forwarded-For`
-- Provision Postgres with the `pgvector` extension enabled
-- Use managed Redis (or a single shared instance — token cache, queue, view-counter all live there)
+- Stack uses **Nginx container** as reverse proxy (gzip enabled, Cloudflare Origin Cert) — see `../scripts/DEPLOY.md`
+- Cloudflare proxy ON for all subdomains; cache rule in place for public read endpoints
+- Use managed Redis (or a single shared instance — token cache, rate limit, view-counter all live there)
 - For S3, swap MinIO endpoint/keys to AWS or any S3-compatible provider
 - Run `prisma migrate deploy` — never `migrate dev` against prod
+- `./scripts/deploy-backend.sh` handles rsync + rebuild + smoke test
+
+## Roadmap
+
+See `ROADMAP.md` for performance/UX improvements (compression, skeleton loaders, CDN cache, etc.) — most done as of 2026-05-08.
