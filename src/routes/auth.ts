@@ -104,7 +104,7 @@ authRoutes.post(
 	ipRateLimit({ keyPrefix: "setup", limit: 5, windowSeconds: 60 * 15 }),
 	zValidator("json", setupSchema),
 	async (c) => {
-		if (env.SETUP_TOKEN) {
+		if (env.SETUP_TOKEN != null) {
 			const provided = c.req.header("x-setup-token");
 			if (!provided || provided !== env.SETUP_TOKEN) {
 				return c.json({ error: "Setup not allowed" }, 403);

@@ -1,5 +1,6 @@
 import { prisma } from "../db";
 import { publishToUser } from "./realtime";
+import { logger } from "./logger";
 
 export type NotificationType = "follow" | "post_published" | "post_updated" | "comment_reply";
 
@@ -14,6 +15,11 @@ export interface CreateNotificationInput {
 export async function createNotification(input: CreateNotificationInput) {
 	// Don't notify yourself for actions you triggered.
 	if (input.actorId && input.actorId === input.userId) return null;
+
+	if (input.type === "comment_reply" && !input.commentId) {
+		logger.warn({ input }, "[notifications] comment_reply missing commentId — skipping");
+		return null;
+	}
 
 	const notif = await prisma.notification.create({
 		data: {

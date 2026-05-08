@@ -2,15 +2,17 @@ import { redis } from "./redis";
 import { prisma } from "../db";
 import { logger } from "./logger";
 
+const VC_KEY_PREFIX = "blog:vc:post:";
+
 export async function incrementView(postId: string): Promise<void> {
-	await redis.incr(`viewcount:${postId}`);
+	await redis.incr(`${VC_KEY_PREFIX}${postId}`);
 }
 
 // Read the unflushed view count sitting in Redis. Add this to posts.viewCount
 // in API responses so readers see an accurate number without waiting for the
 // 30s flush.
 export async function getPendingViews(postId: string): Promise<number> {
-	const v = await redis.get(`viewcount:${postId}`);
+	const v = await redis.get(`${VC_KEY_PREFIX}${postId}`);
 	return v ? Number(v) : 0;
 }
 
@@ -18,7 +20,7 @@ export async function getPendingViews(postId: string): Promise<number> {
 export async function getPendingViewsMap(postIds: string[]): Promise<Map<string, number>> {
 	const map = new Map<string, number>();
 	if (postIds.length === 0) return map;
-	const keys = postIds.map((id) => `viewcount:${id}`);
+	const keys = postIds.map((id) => `${VC_KEY_PREFIX}${id}`);
 	const values = await redis.mget(...keys);
 	postIds.forEach((id, i) => {
 		const v = values[i];
@@ -27,7 +29,7 @@ export async function getPendingViewsMap(postIds: string[]): Promise<Map<string,
 	return map;
 }
 
-const FLUSH_LOCK_KEY = "viewcount:flush:lock";
+const FLUSH_LOCK_KEY = "blog:vc:flush:lock";
 // TTL must be long enough to cover a slow flush of a large keyspace, but short
 // enough that a crashed instance frees the lock before the next 30s tick.
 const FLUSH_LOCK_TTL_SECONDS = 60;
@@ -46,7 +48,7 @@ export async function flushViewCounts(): Promise<void> {
 		const keys: string[] = [];
 		let cursor = 0;
 		do {
-			const [next, batch] = await redis.scan(cursor, "MATCH", "viewcount:*", "COUNT", 100);
+			const [next, batch] = await redis.scan(cursor, "MATCH", `${VC_KEY_PREFIX}*`, "COUNT", 100);
 			cursor = Number(next);
 			keys.push(...batch);
 		} while (cursor !== 0);
@@ -56,7 +58,7 @@ export async function flushViewCounts(): Promise<void> {
 			const count = await redis.getdel(key);
 			if (!count || count === "0") continue;
 
-			const postId = key.replace("viewcount:", "");
+			const postId = key.replace(VC_KEY_PREFIX, "");
 			await prisma.post.update({
 				where: { id: postId },
 				data: { viewCount: { increment: Number(count) } },
