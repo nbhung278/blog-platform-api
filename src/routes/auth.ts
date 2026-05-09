@@ -33,10 +33,11 @@ import {
 	rotateRefreshCookie,
 	setAuthCookies,
 } from "../lib/cookies";
+import { isAllowedMediaUrl } from "../lib/url-allowlist";
 
 export const authRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
-const passwordSchema = z
+export const passwordSchema = z
 	.string()
 	.min(12, "Password must be at least 12 characters")
 	.regex(/[A-Z]/, "Must contain an uppercase letter")
@@ -104,7 +105,7 @@ authRoutes.post(
 	ipRateLimit({ keyPrefix: "setup", limit: 5, windowSeconds: 60 * 15 }),
 	zValidator("json", setupSchema),
 	async (c) => {
-		if (env.SETUP_TOKEN != null) {
+		if (env.SETUP_TOKEN) {
 			const provided = c.req.header("x-setup-token");
 			if (!provided || provided !== env.SETUP_TOKEN) {
 				return c.json({ error: "Setup not allowed" }, 403);
@@ -174,7 +175,7 @@ authRoutes.post(
 	ipRateLimit({ keyPrefix: "register", limit: 5, windowSeconds: 60 * 60 }),
 	zValidator("json", registerSchema),
 	async (c) => {
-		if (process.env.ALLOW_REGISTRATION !== "true") {
+		if (!env.ALLOW_REGISTRATION) {
 			return c.json({ error: "Registration is not open" }, 403);
 		}
 
@@ -429,7 +430,12 @@ authRoutes.get("/me", authMiddleware, async (c) => {
 const updateMeSchema = z.object({
 	name: z.string().min(1).max(100).optional(),
 	bio: z.string().max(500).nullable().optional(),
-	avatarUrl: z.string().url().nullable().optional(),
+	avatarUrl: z
+		.string()
+		.url()
+		.refine((u) => isAllowedMediaUrl(u), "avatarUrl host not allowed")
+		.nullable()
+		.optional(),
 });
 
 authRoutes.patch("/me", authMiddleware, zValidator("json", updateMeSchema), async (c) => {

@@ -7,6 +7,7 @@ import { prisma } from "../db";
 import { authMiddleware, requirePermission, type JWTPayload } from "../middleware/auth";
 import { PERMISSIONS, ROLE_KEYS } from "../lib/permissions";
 import { bumpTokenVersion } from "../lib/tokens";
+import { passwordSchema } from "./auth";
 
 export const usersRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
@@ -14,7 +15,7 @@ usersRoutes.use("*", authMiddleware, requirePermission(PERMISSIONS.USER_MANAGE))
 
 const createUserSchema = z.object({
 	email: z.string().email(),
-	password: z.string().min(8),
+	password: passwordSchema,
 	name: z.string().min(1),
 	username: z
 		.string()
@@ -33,7 +34,7 @@ const updateUserSchema = z.object({
 		.max(30)
 		.regex(/^[a-z0-9-]+$/)
 		.optional(),
-	password: z.string().min(8).optional(),
+	password: passwordSchema.optional(),
 	roleIds: z.array(z.string().uuid()).optional(),
 });
 

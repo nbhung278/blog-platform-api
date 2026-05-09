@@ -34,10 +34,10 @@ export function ipRateLimit({ keyPrefix, limit, windowSeconds, keyExtractor }: O
 		const extra = keyExtractor ? `:${keyExtractor(c)}` : "";
 		const key = `ratelimit:${keyPrefix}:${ip}${extra}`;
 
+		// SET NX EX is atomic: creates the key with TTL in one operation so a
+		// crash between INCR and EXPIRE can never leave a key without an expiry.
+		await redis.set(key, "0", "EX", windowSeconds, "NX");
 		const count = await redis.incr(key);
-		if (count === 1) {
-			await redis.expire(key, windowSeconds);
-		}
 
 		if (count > limit) {
 			const ttl = await redis.ttl(key);
@@ -60,10 +60,8 @@ export function userRateLimit({ keyPrefix, limit, windowSeconds }: Omit<Options,
 		}
 		const key = `ratelimit:${keyPrefix}:user:${user.sub}`;
 
+		await redis.set(key, "0", "EX", windowSeconds, "NX");
 		const count = await redis.incr(key);
-		if (count === 1) {
-			await redis.expire(key, windowSeconds);
-		}
 
 		if (count > limit) {
 			const ttl = await redis.ttl(key);
@@ -118,8 +116,8 @@ export function loginRateLimit() {
 	return createMiddleware(async (c, next) => {
 		const ip = getClientIp(c);
 
+		await redis.set(ipKey(ip), "0", "EX", LOGIN_IP_WINDOW, "NX");
 		const ipCount = await redis.incr(ipKey(ip));
-		if (ipCount === 1) await redis.expire(ipKey(ip), LOGIN_IP_WINDOW);
 		if (ipCount > LOGIN_IP_LIMIT) {
 			const ttl = await redis.ttl(ipKey(ip));
 			c.header("Retry-After", String(ttl));

@@ -1,12 +1,69 @@
 import { Hono } from "hono";
 import sharp from "sharp";
+import { request as nodeHttpRequest } from "node:http";
+import { request as nodeHttpsRequest } from "node:https";
+import { Readable } from "node:stream";
+import type { IncomingMessage } from "node:http";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { uploadImage } from "../lib/s3";
 import { ipRateLimit } from "../middleware/rate-limit";
 import { logger } from "../lib/logger";
-import { isPrivateOrLocalHost } from "../lib/ssrf-guard";
+import { resolveHostSafe } from "../lib/ssrf-guard";
 import { isAllowedMediaUrl } from "../lib/url-allowlist";
+
+function nodeIncomingToResponse(res: IncomingMessage): Response {
+	const headers = new Headers();
+	for (const [k, v] of Object.entries(res.headers)) {
+		if (v === undefined) continue;
+		for (const val of Array.isArray(v) ? v : [v]) headers.append(k, val);
+	}
+	const body = Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>;
+	return new Response(body, { status: res.statusCode ?? 200, headers });
+}
+
+// Fetch `url` by connecting to the pre-resolved `pinnedIp` rather than
+// letting the OS re-resolve the hostname. This closes the DNS-rebinding
+// window between the SSRF check and the actual TCP connect.
+function fetchPinned(
+	url: URL,
+	pinnedIp: string,
+	family: 4 | 6,
+	timeoutMs: number,
+): Promise<Response> {
+	return new Promise((resolve, reject) => {
+		const isHttps = url.protocol === "https:";
+		const requestFn = isHttps ? nodeHttpsRequest : nodeHttpRequest;
+		const port = url.port ? Number(url.port) : isHttps ? 443 : 80;
+		// IPv6 literals must be wrapped in brackets for the `host` option.
+		const hostValue = family === 6 ? `[${pinnedIp}]` : pinnedIp;
+
+		const timer = setTimeout(() => req.destroy(new Error("rehost timeout")), timeoutMs);
+
+		const req = requestFn(
+			{
+				host: hostValue,
+				port,
+				path: url.pathname + url.search,
+				method: "GET",
+				headers: {
+					Host: url.hostname,
+					"User-Agent": "blog-platform-rehost/1.0",
+				},
+				...(isHttps ? { servername: url.hostname } : {}),
+			},
+			(res) => {
+				clearTimeout(timer);
+				resolve(nodeIncomingToResponse(res));
+			},
+		);
+		req.on("error", (err) => {
+			clearTimeout(timer);
+			reject(err);
+		});
+		req.end();
+	});
+}
 
 const uploadLimit = ipRateLimit({ keyPrefix: "upload", limit: 20, windowSeconds: 60 * 15 });
 
@@ -131,28 +188,32 @@ uploadsRoutes.post(
 			return c.json({ url: parsed.toString() }, 200);
 		}
 
-		// SSRF guard: refuse to fetch from private/loopback/link-local hosts so an
-		// attacker can't probe internal services or cloud metadata via this proxy.
+		// SSRF guard: resolve the hostname once, verify every returned IP is
+		// outside all blocked ranges, then pin the TCP connection to that IP.
+		// Using the pre-resolved IP for the actual request closes the DNS-rebinding
+		// window — an attacker can't swap the DNS record between our check and the
+		// connect. node:http/https connects to `host: pinnedIp` directly; for TLS,
+		// `servername` keeps SNI pointing at the original hostname so cert
+		// validation still works correctly.
+		let pinnedIp: string;
+		let pinnedFamily: 4 | 6;
 		try {
-			if (await isPrivateOrLocalHost(parsed.hostname)) {
-				return c.json({ error: "URL host not allowed" }, 400);
-			}
+			const safe = await resolveHostSafe(parsed.hostname);
+			pinnedIp = safe.ip;
+			pinnedFamily = safe.family;
 		} catch (err) {
+			const isBlocked = err instanceof Error && err.message === "blocked";
+			if (isBlocked) return c.json({ error: "URL host not allowed" }, 400);
 			logger.error({ err, host: parsed.hostname }, "[uploads] dns resolve failed");
 			return c.json({ error: "Could not resolve URL" }, 400);
 		}
 
-		// `redirect: "manual"` because following redirects re-opens the SSRF hole
-		// the DNS check just closed: a public host can 302 to an internal IP and
-		// fetch would happily follow. We tell the user to give us the final URL
-		// instead. Practically, image CDNs serve directly without redirects.
+		// Fetch directly to the pinned IP. Node's http/https modules do NOT
+		// follow redirects automatically, so 3xx responses come back as-is —
+		// no need for `redirect: "manual"`.
 		let res: Response;
 		try {
-			res = await fetch(parsed.toString(), {
-				redirect: "manual",
-				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-				headers: { "User-Agent": "blog-platform-rehost/1.0" },
-			});
+			res = await fetchPinned(parsed, pinnedIp, pinnedFamily, FETCH_TIMEOUT_MS);
 		} catch (err) {
 			logger.warn({ err, url: parsed.toString() }, "[uploads] rehost fetch failed");
 			return c.json({ error: "Could not fetch URL" }, 400);

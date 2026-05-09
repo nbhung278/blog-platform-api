@@ -17,7 +17,10 @@ export async function createNotification(input: CreateNotificationInput) {
 	if (input.actorId && input.actorId === input.userId) return null;
 
 	if (input.type === "comment_reply" && !input.commentId) {
-		logger.warn({ input }, "[notifications] comment_reply missing commentId — skipping");
+		logger.warn(
+			{ type: input.type, actorId: input.actorId, postId: input.postId },
+			"[notifications] comment_reply missing commentId — skipping",
+		);
 		return null;
 	}
 

@@ -44,6 +44,14 @@ const EnvSchema = z.object({
 	// reachable for bootstrapping without leaving it open to whoever races the
 	// first signup if the DB ever ends up empty.
 	SETUP_TOKEN: z.string().min(16).optional(),
+
+	// Open public registration. Off by default so a fresh deploy is not
+	// immediately open to anyone who finds the endpoint.
+	ALLOW_REGISTRATION: z
+		.string()
+		.optional()
+		.transform((v) => v === "true")
+		.default("false"),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
