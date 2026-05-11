@@ -18,6 +18,7 @@ import { bookmarksRoutes } from "./routes/bookmarks";
 import { commentsRoutes } from "./routes/comments";
 import { conversationsRoutes } from "./routes/conversations";
 import { shareRoutes } from "./routes/share";
+import { webhooksRoutes } from "./routes/webhooks";
 import { startViewCountFlusher, stopViewCountFlusher, flushViewCounts } from "./lib/view-counter";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
 import { prisma } from "./db";
@@ -96,6 +97,9 @@ app.route("/api/conversations", conversationsRoutes);
 // Public OG-tag / unfurl route. Lives outside /api/* so the share URLs are
 // short and obviously not a JSON endpoint.
 app.route("/share", shareRoutes);
+// External webhooks. Lives outside /api/* because the provider URL was
+// registered as /webhooks/resend; changing it would require re-registering.
+app.route("/webhooks", webhooksRoutes);
 
 app.get("/", (c) => c.json({ status: "ok" }));
 

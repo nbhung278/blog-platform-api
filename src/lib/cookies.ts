@@ -74,8 +74,17 @@ export function getCsrfCookie(c: Context): string | undefined {
 	return getCookie(c, COOKIE_NAMES[getAppKind(c)].csrf);
 }
 
-export function setAuthCookies(c: Context, tokens: { accessToken: string; refreshToken: string }) {
-	const names = COOKIE_NAMES[getAppKind(c)];
+export function setAuthCookies(
+	c: Context,
+	tokens: { accessToken: string; refreshToken: string },
+	// Browser-driven flows (e.g. OAuth callback redirects) don't carry the
+	// X-App-Client header that getAppKind() relies on, so the caller can pin
+	// the partition explicitly. Defaults to whatever the request header says,
+	// which falls back to "admin" — wrong for the SPA at strix-blog.uk.
+	override?: AppKind,
+) {
+	const kind = override ?? getAppKind(c);
+	const names = COOKIE_NAMES[kind];
 	setCookie(c, names.access, tokens.accessToken, baseOptions("access"));
 	setCookie(c, names.refresh, tokens.refreshToken, baseOptions("refresh"));
 	const csrf = randomBytes(32).toString("base64url");

@@ -9,13 +9,15 @@ datasource db {
 model User {
   id                 String   @id @default(uuid()) @db.Uuid
   email              String   @unique
-  passwordHash       String   @map("password_hash")
+  passwordHash       String?  @map("password_hash")
   name               String
   username           String   @unique
   bio                String?
   avatarUrl          String?  @map("avatar_url")
   plan               String   @default("free")
   mustChangePassword Boolean  @default(false) @map("must_change_password")
+  emailVerified      Boolean  @default(false) @map("email_verified")
+  googleId           String?  @unique @map("google_id")
   tokenVersion       Int      @default(0) @map("token_version")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
@@ -24,6 +26,7 @@ model User {
   comments               Comment[]
   roles                  UserRole[]
   refreshTokens          RefreshToken[]
+  knownDevices             KnownDevice[]
   followers              Follow[]       @relation("UserFollowers")
   following              Follow[]       @relation("UserFollowing")
   notifications          Notification[] @relation("NotificationRecipient")
@@ -36,6 +39,31 @@ model User {
   messageReactions         MessageReaction[]
 
   @@map("users")
+}
+
+model KnownDevice {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  fingerprint String
+  userAgent   String?  @map("user_agent")
+  ip          String?
+  lastUsedAt  DateTime @default(now()) @map("last_used_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, fingerprint])
+  @@index([userId])
+  @@map("known_devices")
+}
+
+model EmailSuppression {
+  email      String   @id
+  reason     String
+  bounceType String?  @map("bounce_type")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("email_suppressions")
 }
 
 model RefreshToken {

@@ -52,6 +52,32 @@ const EnvSchema = z.object({
 		.optional()
 		.transform((v) => v === "true")
 		.default("false"),
+
+	// Transactional email (Resend). EMAIL_ENABLED is a kill switch — when off,
+	// OTP flows still run their logic but the email itself is skipped, so we
+	// can disable email globally without redeploying if the provider has an
+	// incident. The other fields are only meaningful when EMAIL_ENABLED=true.
+	EMAIL_ENABLED: z
+		.string()
+		.optional()
+		.transform((v) => v === "true")
+		.default("false"),
+	RESEND_API_KEY: z.string().optional(),
+	RESEND_WEBHOOK_SECRET: z.string().optional(),
+	EMAIL_FROM: z.string().default("Strix Blog <noreply@mail.strix-blog.uk>"),
+	EMAIL_REPLY_TO: z.string().default("support@strix-blog.uk"),
+
+	// Frontend URL used to build links in transactional emails (reset password
+	// callback, etc.). Defaults to APP_URL but kept separate so email links
+	// can point at a different host if needed.
+	FRONTEND_URL: z.string().url().optional(),
+
+	// Google OAuth (Phase 2). When all three are set, the /google routes are
+	// active; otherwise the backend rejects them with 503 so a half-configured
+	// deploy can't silently expose a broken sign-in path.
+	GOOGLE_CLIENT_ID: z.string().optional(),
+	GOOGLE_CLIENT_SECRET: z.string().optional(),
+	GOOGLE_REDIRECT_URI: z.string().url().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
