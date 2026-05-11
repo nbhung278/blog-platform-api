@@ -153,8 +153,14 @@ const RESEND_LIMIT = 5;
 
 export async function canResend(purpose: OtpPurpose, identifier: string): Promise<boolean> {
 	const k = `otp:resend:${purpose}:${identifier.toLowerCase()}`;
-	await redis.set(k, "0", "EX", RESEND_WINDOW_SECONDS, "NX");
+	// INCR creates the key with value 1 if it doesn't exist. We then set the TTL
+	// only on the first increment (NX = "only if not already set"). This avoids
+	// the SET-NX-then-INCR race where the key expires between the two commands,
+	// causing INCR to create a persistent key with no TTL.
 	const count = await redis.incr(k);
+	if (count === 1) {
+		await redis.expire(k, RESEND_WINDOW_SECONDS);
+	}
 	return count <= RESEND_LIMIT;
 }
 

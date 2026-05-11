@@ -63,7 +63,9 @@ export function verifyState(state: string): boolean {
 	const [nonce, tsStr, sig] = parts;
 	const ts = Number(tsStr);
 	if (!Number.isFinite(ts)) return false;
-	if (Math.floor(Date.now() / 1000) - ts > STATE_MAX_AGE_SECONDS) return false;
+	const now = Math.floor(Date.now() / 1000);
+	if (ts > now + 5) return false; // reject future-dated states
+	if (now - ts > STATE_MAX_AGE_SECONDS) return false;
 
 	const expected = createHmac("sha256", env.JWT_SECRET)
 		.update(`${nonce}.${tsStr}`)
