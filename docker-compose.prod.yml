@@ -51,7 +51,7 @@ services:
         "--maxmemory",
         "96mb",
         "--maxmemory-policy",
-        "noeviction",
+        "allkeys-lru",
       ]
     volumes:
       - redisdata:/data

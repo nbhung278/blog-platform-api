@@ -367,13 +367,18 @@ conversationsRoutes.post(
 			select: { userId: true },
 		});
 
+		// Build the per-emoji aggregation once (counts are the same for everyone),
+		// then flip only `reactedByMe` per recipient — O(reactions) instead of
+		// O(participants × reactions).
+		const baseReactions = buildReactions(allReactions, "");
 		for (const { userId } of participants) {
+			const myEmojis = new Set(allReactions.filter((r) => r.userId === userId).map((r) => r.emoji));
 			publishToUser(userId, {
 				kind: "message_reaction" as const,
 				data: {
 					messageId: msgId,
 					conversationId: convId,
-					reactions: buildReactions(allReactions, userId),
+					reactions: baseReactions.map((r) => ({ ...r, reactedByMe: myEmojis.has(r.emoji) })),
 				},
 			});
 		}
