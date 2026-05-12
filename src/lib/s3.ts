@@ -77,6 +77,23 @@ export async function deleteObject(key: string): Promise<void> {
  * Returns null for: empty/null URL, URL on a different host (legacy/external),
  * or our-host URL whose path prefix doesn't match the expected owner.
  */
+/**
+ * Extract all S3 keys for owned inline images embedded in HTML content.
+ * Parses every <img src="..."> and runs each through extractOwnedS3Key.
+ */
+export function extractInlineImageKeys(
+	contentHtml: string | null | undefined,
+	ownerId: string,
+): string[] {
+	if (!contentHtml) return [];
+	const keys: string[] = [];
+	for (const match of contentHtml.matchAll(/<img[^>]+src="([^"]+)"/g)) {
+		const key = extractOwnedS3Key(match[1], ownerId);
+		if (key) keys.push(key);
+	}
+	return keys;
+}
+
 export function extractOwnedS3Key(url: string | null | undefined, ownerId: string): string | null {
 	if (!url) return null;
 	// Accept either the CDN prefix (new URLs) or the bare S3 prefix (legacy URLs

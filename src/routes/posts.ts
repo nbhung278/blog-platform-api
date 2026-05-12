@@ -10,7 +10,7 @@ import { incrementView, getPendingViews, getPendingViewsMap } from "../lib/view-
 import { notifyFollowersOfPost } from "../lib/notifications";
 import { logger } from "../lib/logger";
 import { isAllowedMediaUrl } from "../lib/url-allowlist";
-import { deleteObject, extractOwnedS3Key } from "../lib/s3";
+import { deleteObject, extractOwnedS3Key, extractInlineImageKeys } from "../lib/s3";
 
 export const postsRoutes = new Hono();
 
@@ -185,7 +185,7 @@ postsRoutes.post(
 		// Fetch all posts to check ownership
 		const posts = await prisma.post.findMany({
 			where: { id: { in: ids }, deletedAt: null },
-			select: { id: true, userId: true, coverUrl: true },
+			select: { id: true, userId: true, coverUrl: true, contentHtml: true },
 		});
 
 		// Determine which posts the caller may actually delete. If they can only
@@ -220,6 +220,7 @@ postsRoutes.post(
 		for (const p of targets) {
 			const key = extractOwnedS3Key(p.coverUrl, p.userId);
 			if (key) void deleteObject(key);
+			for (const k of extractInlineImageKeys(p.contentHtml, p.userId)) void deleteObject(k);
 		}
 
 		return c.json({ deleted: result.count });
@@ -688,7 +689,7 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 
 	const existing = await prisma.post.findUnique({
 		where: { id: postId },
-		select: { userId: true, deletedAt: true, coverUrl: true },
+		select: { userId: true, deletedAt: true, coverUrl: true, contentHtml: true },
 	});
 
 	if (!existing || existing.deletedAt) {
@@ -712,6 +713,8 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 	// post owner — defends against coverUrl pointing at someone else's file.
 	const key = extractOwnedS3Key(existing.coverUrl, existing.userId);
 	if (key) void deleteObject(key);
+	for (const k of extractInlineImageKeys(existing.contentHtml, existing.userId))
+		void deleteObject(k);
 
 	return c.json({ success: true });
 });
