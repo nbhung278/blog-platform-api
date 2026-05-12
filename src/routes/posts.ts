@@ -123,9 +123,7 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 	const page = Math.max(1, Number(c.req.query("page")) || 1);
 	const limit = Math.min(100, Math.max(1, Number(c.req.query("limit")) || 20));
 
-	const canSeeAll =
-		user.permissions.includes(PERMISSIONS.POST_WRITE_ANY) ||
-		user.permissions.includes(PERMISSIONS.POST_REVIEW);
+	const canSeeAll = user.permissions.includes(PERMISSIONS.POST_VIEW_ANY);
 
 	const wantAll = scope === "all" && canSeeAll;
 
@@ -465,9 +463,7 @@ postsRoutes.get("/id/:id", authMiddleware, async (c) => {
 	}
 
 	const isOwner = post.userId === user.sub;
-	const canSeeAny =
-		user.permissions.includes(PERMISSIONS.POST_WRITE_ANY) ||
-		user.permissions.includes(PERMISSIONS.POST_REVIEW);
+	const canSeeAny = user.permissions.includes(PERMISSIONS.POST_VIEW_ANY);
 
 	if (!isOwner && !canSeeAny) {
 		return c.json({ error: "Forbidden" }, 403);

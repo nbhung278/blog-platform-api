@@ -14,7 +14,13 @@ import {
 	recordLoginSuccess,
 	getClientIp,
 } from "../middleware/rate-limit";
-import { ROLE_KEYS } from "../lib/permissions";
+import {
+	ADMIN_PANEL_PERMISSIONS,
+	ROLE_KEYS,
+	expandPermissions,
+	type PermissionKey,
+} from "../lib/permissions";
+import { loadUserRolesAndPermissions } from "../lib/user-permissions";
 import { env } from "../lib/env";
 import {
 	bumpTokenVersion,
@@ -381,10 +387,18 @@ authRoutes.post("/login", loginRateLimit(), zValidator("json", loginSchema), asy
 
 	const ctx = clientContext(c);
 
+	// Admins skip the device step-up: they sign in from work/home/oncall
+	// machines often enough that the email round-trip becomes friction
+	// rather than security. The pool is small and password-protected.
+	// We pass `userRolesPerms` into issueTokenPair below to avoid a second
+	// DB query for the same data.
+	const userRolesPerms = await loadUserRolesAndPermissions(user.id);
+	const isAdmin = userRolesPerms.permissions.some((p) => ADMIN_PANEL_PERMISSIONS.includes(p));
+
 	// Device-bound step-up: if this IP+UA fingerprint has never confirmed an
 	// OTP for this user, hold off on issuing cookies and send a one-time code
 	// instead. Verified devices skip the extra step.
-	if (!(await isKnownDevice(user.id, ctx))) {
+	if (!isAdmin && !(await isKnownDevice(user.id, ctx))) {
 		// Drop any outstanding login OTP for this email so a code we mailed
 		// minutes ago can't still be used from a stale tab.
 		await invalidateOtpsForEmail("login", user.email);
@@ -415,7 +429,7 @@ authRoutes.post("/login", loginRateLimit(), zValidator("json", loginSchema), asy
 
 	await recordLoginSuccess(email);
 	await trustDevice(user.id, ctx);
-	const pair = await issueTokenPair(user, ctx);
+	const pair = await issueTokenPair(user, ctx, userRolesPerms);
 	setAuthCookies(c, { accessToken: pair.accessToken, refreshToken: pair.refreshToken });
 
 	return c.json({
@@ -819,9 +833,9 @@ authRoutes.get("/me", authMiddleware, async (c) => {
 	}
 
 	const roles = user.roles.map((ur) => ur.role.key);
-	const permSet = new Set<string>();
+	const permSet = new Set<PermissionKey>();
 	for (const ur of user.roles) {
-		for (const rp of ur.role.permissions) permSet.add(rp.permission.key);
+		for (const rp of ur.role.permissions) permSet.add(rp.permission.key as PermissionKey);
 	}
 
 	const { roles: _userRoles, passwordHash, googleId, ...profile } = user;
@@ -830,7 +844,7 @@ authRoutes.get("/me", authMiddleware, async (c) => {
 		hasPassword: passwordHash !== null,
 		googleLinked: googleId !== null,
 		roles,
-		permissions: Array.from(permSet),
+		permissions: expandPermissions(Array.from(permSet)),
 	});
 });
 

@@ -3,6 +3,7 @@ import { sign } from "hono/jwt";
 import { prisma } from "../db";
 import { redis } from "./redis";
 import { loadUserRolesAndPermissions } from "./user-permissions";
+import type { PermissionKey } from "./permissions";
 import { env } from "./env";
 
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
@@ -16,8 +17,15 @@ export type AccessTokenUser = {
 	tokenVersion: number;
 };
 
-export async function issueAccessToken(user: AccessTokenUser) {
-	const { roles, permissions } = await loadUserRolesAndPermissions(user.id);
+// Optional `preloaded`: if the caller already loaded roles/permissions for
+// another check (e.g. /login deciding whether to skip OTP step-up), pass them
+// in to avoid a second DB round-trip. Must be the same shape `loadUserRoles
+// AndPermissions` would return.
+export async function issueAccessToken(
+	user: AccessTokenUser,
+	preloaded?: { roles: string[]; permissions: PermissionKey[] },
+) {
+	const { roles, permissions } = preloaded ?? (await loadUserRolesAndPermissions(user.id));
 	const token = await sign(
 		{
 			sub: user.id,
@@ -121,8 +129,9 @@ export async function issueRefreshToken(opts: {
 export async function issueTokenPair(
 	user: AccessTokenUser,
 	context: { userAgent?: string | null; ip?: string | null },
+	preloaded?: { roles: string[]; permissions: PermissionKey[] },
 ) {
-	const access = await issueAccessToken(user);
+	const access = await issueAccessToken(user, preloaded);
 	const refresh = await issueRefreshToken({
 		userId: user.id,
 		userAgent: context.userAgent,

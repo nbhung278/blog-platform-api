@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { prisma } from "../db";
-import { authMiddleware, requireAnyPermission } from "../middleware/auth";
+import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { ipRateLimit } from "../middleware/rate-limit";
 
@@ -26,7 +26,7 @@ const categorySchema = z.object({
 
 // Public: list all categories (includes postCount)
 categoriesRoutes.get("/", readLimit, async (c) => {
-	c.header("Cache-Control", "public, max-age=300, stale-while-revalidate=60");
+	c.header("Cache-Control", "public, s-maxage=300, stale-while-revalidate=60");
 	const categories = await prisma.category.findMany({
 		orderBy: { name: "asc" },
 		include: { _count: { select: { posts: true } } },
@@ -43,11 +43,11 @@ categoriesRoutes.get("/:id", async (c) => {
 	return c.json(category);
 });
 
-// [auth] Create category — requires role:manage or post:write:any
+// [auth] Create category — requires category:manage
 categoriesRoutes.post(
 	"/",
 	authMiddleware,
-	requireAnyPermission(PERMISSIONS.ROLE_MANAGE, PERMISSIONS.POST_WRITE_ANY),
+	requirePermission(PERMISSIONS.CATEGORY_MANAGE),
 	zValidator("json", categorySchema),
 	async (c) => {
 		const { name, description } = c.req.valid("json");
@@ -69,7 +69,7 @@ categoriesRoutes.post(
 categoriesRoutes.patch(
 	"/:id",
 	authMiddleware,
-	requireAnyPermission(PERMISSIONS.ROLE_MANAGE, PERMISSIONS.POST_WRITE_ANY),
+	requirePermission(PERMISSIONS.CATEGORY_MANAGE),
 	zValidator("json", categorySchema.partial()),
 	async (c) => {
 		const id = c.req.param("id");
@@ -94,7 +94,7 @@ categoriesRoutes.patch(
 categoriesRoutes.delete(
 	"/:id",
 	authMiddleware,
-	requireAnyPermission(PERMISSIONS.ROLE_MANAGE, PERMISSIONS.POST_WRITE_ANY),
+	requirePermission(PERMISSIONS.CATEGORY_MANAGE),
 	async (c) => {
 		const id = c.req.param("id");
 		const existing = await prisma.category.findUnique({

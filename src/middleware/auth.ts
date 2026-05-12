@@ -132,3 +132,17 @@ export function requireAnyPermission(...allowed: PermissionKey[]) {
 		await next();
 	});
 }
+
+// Method-aware permission check: GET/HEAD/OPTIONS need `view`, everything else
+// needs `manage`. Convenient for resource routers where read and write share the
+// same path prefix. `manage` is assumed to imply `view` (enforced by
+// expandPermissions at token-issue time), so callers with only `manage` still
+// pass the GET branch.
+const READ_METHODS = new Set(["GET", "HEAD"]);
+
+export function requireViewOrManage(viewPerm: PermissionKey, managePerm: PermissionKey) {
+	return createMiddleware<{ Variables: { user: JWTPayload } }>(async (c, next) => {
+		const required = READ_METHODS.has(c.req.method) ? viewPerm : managePerm;
+		return requirePermission(required)(c, next);
+	});
+}

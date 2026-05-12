@@ -2,13 +2,17 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { prisma } from "../db";
-import { authMiddleware, requirePermission } from "../middleware/auth";
+import { authMiddleware, requireViewOrManage } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { bumpTokenVersions } from "../lib/tokens";
 
 export const rolesRoutes = new Hono();
 
-rolesRoutes.use("*", authMiddleware, requirePermission(PERMISSIONS.ROLE_MANAGE));
+rolesRoutes.use(
+	"*",
+	authMiddleware,
+	requireViewOrManage(PERMISSIONS.ROLE_VIEW, PERMISSIONS.ROLE_MANAGE),
+);
 
 const upsertRoleSchema = z.object({
 	key: z

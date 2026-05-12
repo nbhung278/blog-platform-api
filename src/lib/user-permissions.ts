@@ -1,5 +1,5 @@
 import { prisma } from "../db";
-import type { PermissionKey } from "./permissions";
+import { expandPermissions, type PermissionKey } from "./permissions";
 
 export async function loadUserRolesAndPermissions(userId: string): Promise<{
 	roles: string[];
@@ -26,6 +26,6 @@ export async function loadUserRolesAndPermissions(userId: string): Promise<{
 
 	return {
 		roles,
-		permissions: Array.from(permissionSet) as PermissionKey[],
+		permissions: expandPermissions(Array.from(permissionSet) as PermissionKey[]),
 	};
 }

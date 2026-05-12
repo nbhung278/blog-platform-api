@@ -4,14 +4,18 @@ import { z } from "zod";
 import { hash } from "bcrypt";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
-import { authMiddleware, requirePermission, type JWTPayload } from "../middleware/auth";
+import { authMiddleware, requireViewOrManage, type JWTPayload } from "../middleware/auth";
 import { PERMISSIONS, ROLE_KEYS } from "../lib/permissions";
 import { bumpTokenVersion } from "../lib/tokens";
 import { passwordSchema } from "./auth";
 
 export const usersRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
-usersRoutes.use("*", authMiddleware, requirePermission(PERMISSIONS.USER_MANAGE));
+usersRoutes.use(
+	"*",
+	authMiddleware,
+	requireViewOrManage(PERMISSIONS.USER_VIEW, PERMISSIONS.USER_MANAGE),
+);
 
 const createUserSchema = z.object({
 	email: z.string().email(),

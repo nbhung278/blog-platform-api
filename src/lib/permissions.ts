@@ -1,4 +1,5 @@
 export const PERMISSIONS = {
+	POST_VIEW_ANY: "post:view:any",
 	POST_WRITE_OWN: "post:write:own",
 	POST_WRITE_ANY: "post:write:any",
 	POST_PUBLISH_ANY: "post:publish:any",
@@ -9,7 +10,10 @@ export const PERMISSIONS = {
 	COMMENT_MODERATE: "comment:moderate",
 	COMMENT_DELETE_ANY: "comment:delete:any",
 	ANALYTICS_VIEW: "analytics:view",
+	CATEGORY_MANAGE: "category:manage",
+	USER_VIEW: "user:view",
 	USER_MANAGE: "user:manage",
+	ROLE_VIEW: "role:view",
 	ROLE_MANAGE: "role:manage",
 } as const;
 
@@ -17,7 +21,27 @@ export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 
 export const ALL_PERMISSIONS: PermissionKey[] = Object.values(PERMISSIONS);
 
+// Holding any of these means the user can sign into the admin panel.
+// Used by /login to skip the device-OTP step-up for admins — admins
+// log in from many devices (work, home, oncall laptop) and the friction
+// of an email round-trip every time isn't worth the marginal protection.
+export const ADMIN_PANEL_PERMISSIONS: PermissionKey[] = [
+	PERMISSIONS.POST_VIEW_ANY,
+	PERMISSIONS.POST_WRITE_OWN,
+	PERMISSIONS.POST_WRITE_ANY,
+	PERMISSIONS.POST_PUBLISH_ANY,
+	PERMISSIONS.POST_REVIEW,
+	PERMISSIONS.COMMENT_MODERATE,
+	PERMISSIONS.ANALYTICS_VIEW,
+	PERMISSIONS.CATEGORY_MANAGE,
+	PERMISSIONS.USER_VIEW,
+	PERMISSIONS.USER_MANAGE,
+	PERMISSIONS.ROLE_VIEW,
+	PERMISSIONS.ROLE_MANAGE,
+];
+
 export const PERMISSION_DESCRIPTIONS: Record<PermissionKey, string> = {
+	[PERMISSIONS.POST_VIEW_ANY]: "View any post (including others' drafts/pending)",
 	[PERMISSIONS.POST_WRITE_OWN]: "Create and edit own posts",
 	[PERMISSIONS.POST_WRITE_ANY]: "Create and edit any post",
 	[PERMISSIONS.POST_PUBLISH_ANY]: "Publish or unpublish any post",
@@ -28,9 +52,35 @@ export const PERMISSION_DESCRIPTIONS: Record<PermissionKey, string> = {
 	[PERMISSIONS.COMMENT_MODERATE]: "Moderate comments (hide, approve)",
 	[PERMISSIONS.COMMENT_DELETE_ANY]: "Delete any comment",
 	[PERMISSIONS.ANALYTICS_VIEW]: "View analytics dashboard",
+	[PERMISSIONS.CATEGORY_MANAGE]: "Manage post categories (create, edit, delete)",
+	[PERMISSIONS.USER_VIEW]: "View users list (read-only)",
 	[PERMISSIONS.USER_MANAGE]: "Manage users (create, deactivate)",
+	[PERMISSIONS.ROLE_VIEW]: "View roles and permissions (read-only)",
 	[PERMISSIONS.ROLE_MANAGE]: "Manage roles and assign permissions",
 };
+
+// Implicit-view rules: holding the "manage/write" permission implicitly grants
+// the matching "view" permission. Keeps role configs from being verbose and
+// avoids the "I can edit but can't open the page" footgun.
+const IMPLIES: Record<string, PermissionKey[]> = {
+	[PERMISSIONS.POST_WRITE_ANY]: [PERMISSIONS.POST_VIEW_ANY],
+	[PERMISSIONS.POST_REVIEW]: [PERMISSIONS.POST_VIEW_ANY],
+	[PERMISSIONS.POST_PUBLISH_ANY]: [PERMISSIONS.POST_VIEW_ANY],
+	[PERMISSIONS.POST_DELETE_ANY]: [PERMISSIONS.POST_VIEW_ANY],
+	[PERMISSIONS.USER_MANAGE]: [PERMISSIONS.USER_VIEW],
+	[PERMISSIONS.ROLE_MANAGE]: [PERMISSIONS.ROLE_VIEW],
+};
+
+// Expand a flat permission list to include all implied permissions.
+// Used at token-issue / `/me` time so the JWT carries the full effective set.
+export function expandPermissions(perms: readonly PermissionKey[]): PermissionKey[] {
+	const out = new Set<PermissionKey>(perms);
+	for (const p of perms) {
+		const implied = IMPLIES[p];
+		if (implied) for (const i of implied) out.add(i);
+	}
+	return Array.from(out);
+}
 
 export const ROLE_KEYS = {
 	SUPER_ADMIN: "super_admin",
@@ -65,6 +115,7 @@ export const DEFAULT_ROLES: Array<{
 			PERMISSIONS.COMMENT_MODERATE,
 			PERMISSIONS.COMMENT_DELETE_ANY,
 			PERMISSIONS.ANALYTICS_VIEW,
+			PERMISSIONS.CATEGORY_MANAGE,
 		],
 	},
 	{

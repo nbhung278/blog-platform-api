@@ -75,7 +75,7 @@ analyticsRoutes.get(
 		}
 
 		const isOwner = post.userId === user.sub;
-		const canSeeAny = user.permissions.includes(PERMISSIONS.POST_WRITE_ANY);
+		const canSeeAny = user.permissions.includes(PERMISSIONS.POST_VIEW_ANY);
 
 		if (!isOwner && !canSeeAny) {
 			return c.json({ error: "Forbidden" }, 403);
