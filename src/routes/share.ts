@@ -37,21 +37,46 @@ function renderShareHtml(opts: {
 	url: string;
 	image: string | null;
 	authorName: string;
+	// When true, omit the <meta refresh> + JS redirect. Used when the worker
+	// proxies this HTML in response to a bot UA — the bot is already on the
+	// canonical URL, so a redirect loops back to itself and Facebook bails on
+	// the unfurl instead of parsing OG tags.
+	skipRedirect?: boolean;
 }): string {
-	const { title, description, url, image, authorName } = opts;
+	const { title, description, url, image, skipRedirect } = opts;
 	const safeTitle = escapeAttr(title);
 	const safeDesc = escapeAttr(description);
 	const safeUrl = escapeAttr(url);
-	const safeAuthor = escapeAttr(authorName);
-	const imageTags = image
-		? `<meta property="og:image" content="${escapeAttr(image)}" />
-		<meta name="twitter:image" content="${escapeAttr(image)}" />
-		<meta name="twitter:card" content="summary_large_image" />`
-		: `<meta name="twitter:card" content="summary" />`;
+	void opts.authorName; // Kept on the option type for callers but intentionally
+	// unused in markup: extra `article:*` tags interfered with FB's parser.
+
+	// Minimal, dev.to-style markup. Earlier iterations included og:image:*
+	// sub-properties (secure_url, type, width, height, alt) and a twitter:*
+	// block; Facebook's parser kept folding the whole document into a
+	// `og:temporal:*` namespace, dropping the unfurl image. dev.to and other
+	// sites that unfurl correctly emit only the essentials, in this order:
+	// type → url → title → image → description → site_name, with twitter:
+	// fields using `twitter:image:src` (not `twitter:image`).
+	const ogImageTag = image ? `<meta property="og:image" content="${escapeAttr(image)}" />` : "";
+	const twitterImageTag = image
+		? `<meta name="twitter:image:src" content="${escapeAttr(image)}" />`
+		: "";
+	const twitterCard = image ? "summary_large_image" : "summary";
 
 	// `0;url=...` makes the browser navigate immediately. The inline script is a
 	// belt-and-suspenders fallback for the rare browser that ignores meta refresh.
 	// The visible body content is just for users with JS disabled.
+	//
+	// When skipRedirect is true (worker-proxied bot request), we omit both —
+	// the bot is on the canonical URL already, so any redirect just loops.
+	const redirectTags = skipRedirect
+		? ""
+		: `<meta http-equiv="refresh" content="0;url=${safeUrl}" />
+	<script>window.location.replace(${JSON.stringify(url)});</script>`;
+	const redirectBody = skipRedirect
+		? ""
+		: `<p>Redirecting to <a href="${safeUrl}">${safeTitle}</a>…</p>`;
+
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -60,19 +85,20 @@ function renderShareHtml(opts: {
 	<title>${safeTitle}</title>
 	<meta name="description" content="${safeDesc}" />
 	<meta property="og:type" content="article" />
-	<meta property="og:title" content="${safeTitle}" />
-	<meta property="og:description" content="${safeDesc}" />
 	<meta property="og:url" content="${safeUrl}" />
-	<meta property="article:author" content="${safeAuthor}" />
+	<meta property="og:title" content="${safeTitle}" />
+	${ogImageTag}
+	<meta property="og:description" content="${safeDesc}" />
+	<meta property="og:site_name" content="Strix" />
+	<meta name="twitter:card" content="${twitterCard}" />
 	<meta name="twitter:title" content="${safeTitle}" />
 	<meta name="twitter:description" content="${safeDesc}" />
-	${imageTags}
+	${twitterImageTag}
 	<link rel="canonical" href="${safeUrl}" />
-	<meta http-equiv="refresh" content="0;url=${safeUrl}" />
-	<script>window.location.replace(${JSON.stringify(url)});</script>
+	${redirectTags}
 </head>
 <body>
-	<p>Redirecting to <a href="${safeUrl}">${safeTitle}</a>…</p>
+	${redirectBody}
 </body>
 </html>`;
 }
@@ -117,12 +143,19 @@ shareRoutes.get(
 
 		const description = post.excerpt ?? `Read "${post.title}" by @${post.user.username} on Strix.`;
 
+		// ?bot=1 is set by the Cloudflare Worker when proxying for a crawler:
+		// the request is on the canonical URL, so a redirect would loop and
+		// some scrapers (Facebook in particular) bail on the unfurl rather than
+		// parsing the OG tags. Strip the redirect for those requests.
+		const skipRedirect = c.req.query("bot") === "1";
+
 		const html = renderShareHtml({
 			title: post.title,
 			description,
 			url: canonical,
 			image: post.coverUrl,
 			authorName: post.user.name ?? post.user.username,
+			skipRedirect,
 		});
 
 		c.header("Content-Type", "text/html; charset=utf-8");
