@@ -19,6 +19,7 @@ import { commentsRoutes } from "./routes/comments";
 import { conversationsRoutes } from "./routes/conversations";
 import { shareRoutes } from "./routes/share";
 import { sitemapRoutes } from "./routes/sitemap";
+import { feedRoutes } from "./routes/feed";
 import { webhooksRoutes } from "./routes/webhooks";
 import { startViewCountFlusher, stopViewCountFlusher, flushViewCounts } from "./lib/view-counter";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
@@ -99,6 +100,10 @@ app.route("/api/conversations", conversationsRoutes);
 // short and obviously not a JSON endpoint.
 app.route("/share", shareRoutes);
 app.route("/sitemap.xml", sitemapRoutes);
+// RSS + Atom feeds. Mounted at the root so the public URLs are /feed.xml and
+// /feed.atom — the deploy script bakes a snapshot into the SPA bucket so the
+// feeds are reachable at strix-blog.uk (not just api.strix-blog.uk).
+app.route("/", feedRoutes);
 // External webhooks. Lives outside /api/* because the provider URL was
 // registered as /webhooks/resend; changing it would require re-registering.
 app.route("/webhooks", webhooksRoutes);

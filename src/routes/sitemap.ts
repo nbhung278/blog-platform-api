@@ -14,18 +14,32 @@ function buildSitemap(
 	posts: { slug: string; updatedAt: Date; user: { username: string } }[],
 	categories: { name: string }[],
 ): string {
-	const staticUrls = [
-		{ loc: APP_URL, changefreq: "daily", priority: "1.0" },
-		{ loc: `${APP_URL}/search`, changefreq: "weekly", priority: "0.7" },
+	// `/search` is excluded: it's a query-driven page with no canonical content,
+	// so listing it just wastes crawl budget without ever ranking. Same reason
+	// we omit `/login`, `/register`, etc. (they're already in robots.txt
+	// Disallow). The homepage `lastmod` mirrors the newest post so crawlers
+	// re-fetch when content actually changes.
+	const newestPostLastmod = posts[0]?.updatedAt.toISOString().split("T")[0];
+
+	type Entry = { loc: string; lastmod?: string; changefreq: string; priority: string };
+
+	const staticUrls: Entry[] = [
+		{
+			loc: APP_URL,
+			lastmod: newestPostLastmod,
+			changefreq: "daily",
+			priority: "1.0",
+		},
 	];
 
-	const categoryUrls = categories.map((c) => ({
+	const categoryUrls: Entry[] = categories.map((c) => ({
 		loc: `${APP_URL}/category/${encodeURIComponent(c.name)}`,
+		lastmod: newestPostLastmod,
 		changefreq: "weekly",
 		priority: "0.6",
 	}));
 
-	const postUrls = posts.map((p) => ({
+	const postUrls: Entry[] = posts.map((p) => ({
 		loc: `${APP_URL}/blog/${p.user.username}/${p.slug}`,
 		lastmod: p.updatedAt.toISOString().split("T")[0],
 		changefreq: "weekly",
@@ -36,7 +50,7 @@ function buildSitemap(
 
 	const urlEntries = allUrls
 		.map((u) => {
-			const lastmod = "lastmod" in u ? `\n    <lastmod>${u.lastmod}</lastmod>` : "";
+			const lastmod = u.lastmod ? `\n    <lastmod>${u.lastmod}</lastmod>` : "";
 			return `  <url>\n    <loc>${u.loc}</loc>${lastmod}\n    <changefreq>${u.changefreq}</changefreq>\n    <priority>${u.priority}</priority>\n  </url>`;
 		})
 		.join("\n");
