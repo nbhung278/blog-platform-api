@@ -448,6 +448,10 @@ postsRoutes.get(
 // [auth] Get a single post by id (for editing / preview).
 // Author can read own, moderator/admin can read any.
 postsRoutes.get("/id/:id", authMiddleware, async (c) => {
+	// Editing flow — author or admin pulls a specific post by ID. Per-user
+	// permission check below, so the response must not be shared across
+	// users by any cache.
+	c.header("Cache-Control", "private, no-store");
 	const user = c.get("user");
 	const id = c.req.param("id");
 
@@ -473,6 +477,131 @@ postsRoutes.get("/id/:id", authMiddleware, async (c) => {
 	const pending = await getPendingViews(post.id);
 	return c.json({ ...post, viewCount: post.viewCount + pending });
 });
+
+// [auth] List the caller's own drafts, most recently edited first.
+// Used by the "Continue writing" section on the home page.
+postsRoutes.get("/my-drafts", authMiddleware, async (c) => {
+	// Per-user data — must not be cached by any shared cache (CDN, browser
+	// disk cache) or one user could be served another user's drafts. Our
+	// Cloudflare cache rule matches every /api/posts/* path that isn't on
+	// the explicit deny-list, so we need to opt OUT here.
+	c.header("Cache-Control", "private, no-store");
+	const user = c.get("user");
+	const limit = Math.min(Math.max(Number(c.req.query("limit")) || 3, 1), 10);
+
+	const drafts = await prisma.post.findMany({
+		where: { userId: user.sub, status: "draft", deletedAt: null },
+		orderBy: { updatedAt: "desc" },
+		take: limit,
+		select: {
+			id: true,
+			title: true,
+			excerpt: true,
+			coverUrl: true,
+			updatedAt: true,
+			readingTime: true,
+			contentMd: true,
+		},
+	});
+
+	const items = drafts.map((d) => {
+		const wordCount = d.contentMd.split(/\s+/).filter(Boolean).length;
+		return {
+			id: d.id,
+			title: d.title,
+			excerpt: d.excerpt,
+			coverUrl: d.coverUrl,
+			updatedAt: d.updatedAt,
+			readingTime: d.readingTime,
+			wordCount,
+		};
+	});
+
+	return c.json({ items });
+});
+
+// [auth] Auto-save a draft. Lightweight PATCH variant for the editor's
+// background autosave loop:
+//   - subset of fields (no categories, no status changes)
+//   - no optimistic-concurrency check (last-write-wins is acceptable for
+//     autosave; the user has no manual save running concurrently)
+//   - no follower fan-out (drafts are private to the author anyway)
+//   - higher rate limit than manual PATCH since this fires every ~30s while
+//     the user is actively typing.
+//
+// Returns the new `version` + `updatedAt` so the client UI can show "Saved Xs
+// ago" and stay in sync with manual saves.
+const autosaveSchema = z.object({
+	title: z.string().min(1).max(200).optional(),
+	contentMd: z.string().max(200_000).optional(),
+	contentHtml: z.string().max(400_000).optional(),
+	excerpt: z.string().max(500).nullable().optional(),
+	coverUrl: z
+		.string()
+		.url()
+		.refine((u) => isAllowedMediaUrl(u), "coverUrl host not allowed")
+		.nullable()
+		.optional(),
+	tags: z.array(z.string().max(50)).max(20).optional(),
+});
+
+postsRoutes.patch(
+	"/:id/autosave",
+	// 10s debounce on the client → worst case ~360 calls/hour for a user
+	// typing nonstop. 600/h gives ~40% headroom for retries + multi-tab
+	// edits without legitimate users ever tripping the limit.
+	ipRateLimit({ keyPrefix: "post-autosave", limit: 600, windowSeconds: 60 * 60 }),
+	authMiddleware,
+	zValidator("json", autosaveSchema),
+	async (c) => {
+		const user = c.get("user");
+		const postId = c.req.param("id");
+		const body = c.req.valid("json");
+
+		const existing = await prisma.post.findUnique({
+			where: { id: postId },
+			select: { userId: true, status: true, deletedAt: true, version: true },
+		});
+
+		if (!existing || existing.deletedAt) {
+			return c.json({ error: "Post not found" }, 404);
+		}
+
+		// Only the author can autosave their own post. Admins editing someone
+		// else's post should use the regular PATCH endpoint so the change has
+		// a manual-save audit trail (version bump on every action).
+		if (existing.userId !== user.sub) {
+			return c.json({ error: "Forbidden" }, 403);
+		}
+
+		// Autosave is for drafts only. Once a post is published/pending review,
+		// edits must go through the regular PATCH so the version-conflict check
+		// and follower fan-out still run.
+		if (existing.status !== "draft") {
+			return c.json({ error: "Autosave only allowed for drafts" }, 409);
+		}
+
+		const readingTime = body.contentMd ? calcReadingTime(body.contentMd) : undefined;
+
+		// Atomic increment so concurrent autosaves (eg the same user typing in
+		// two tabs) can't both read version=N and both write version=N+1 — the
+		// `increment` operator runs server-side so each call lands at a
+		// distinct version. Without this, a manual PATCH that follows would
+		// 409 because its `version` baseline came from one tab while the
+		// other tab silently bumped the row.
+		const updated = await prisma.post.update({
+			where: { id: postId },
+			data: {
+				...body,
+				...(readingTime !== undefined && { readingTime }),
+				version: { increment: 1 },
+			},
+			select: { id: true, version: true, updatedAt: true },
+		});
+
+		return c.json(updated);
+	},
+);
 
 // Public: get post by slug
 postsRoutes.get(

@@ -37,6 +37,7 @@ model User {
   conversationParticipants ConversationParticipant[]
   sentMessages             DirectMessage[]           @relation("SentMessages")
   messageReactions         MessageReaction[]
+  readingProgress          ReadingProgress[]
 
   @@map("users")
 }
@@ -192,6 +193,7 @@ model Post {
   notifications   Notification[]
   claps           PostClap[]
   bookmarks       PostBookmark[]
+  readingProgress ReadingProgress[]
 
   @@unique([userId, slug])
   @@index([status])
@@ -388,4 +390,29 @@ model MessageHiddenByUser {
 
   @@id([messageId, userId])
   @@map("message_hidden_by_user")
+}
+
+// Tracks how far each user has read each post so the home page can surface
+// "Continue reading" cards and the post detail can offer a resume-at-scroll
+// banner. Upserted (not append-only) — one row per (user, post). A nightly
+// cleanup job sweeps stale rows; see scripts/cleanup-reading-progress.ts.
+model ReadingProgress {
+  userId    String   @map("user_id") @db.Uuid
+  postId    String   @map("post_id") @db.Uuid
+  // 0.0–1.0. Stored as float so a writer can stream "fraction visible"
+  // without rounding artifacts on the client.
+  progress  Float    @default(0)
+  // Pixel scroll position to restore on resume. Layout shifts can move the
+  // viewport target a bit, so we treat this as a hint, not source of truth.
+  scrollY   Int      @default(0) @map("scroll_y")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([userId, postId])
+  // List "what user X was reading" — newest first.
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("reading_progress")
 }

@@ -17,6 +17,7 @@ import { clapsRoutes } from "./routes/claps";
 import { bookmarksRoutes } from "./routes/bookmarks";
 import { commentsRoutes } from "./routes/comments";
 import { conversationsRoutes } from "./routes/conversations";
+import { readingProgressRoutes } from "./routes/reading-progress";
 import { shareRoutes } from "./routes/share";
 import { sitemapRoutes } from "./routes/sitemap";
 import { feedRoutes } from "./routes/feed";
@@ -96,6 +97,7 @@ app.route("/api/claps", clapsRoutes);
 app.route("/api/bookmarks", bookmarksRoutes);
 app.route("/api/comments", commentsRoutes);
 app.route("/api/conversations", conversationsRoutes);
+app.route("/api/reading-progress", readingProgressRoutes);
 // Public OG-tag / unfurl route. Lives outside /api/* so the share URLs are
 // short and obviously not a JSON endpoint.
 app.route("/share", shareRoutes);
