@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { prisma } from "../db";
-import { redis } from "../lib/redis";
 import { env } from "../lib/env";
+import { cachedOrBuild } from "../lib/cache-lock";
 
 export const feedRoutes = new Hono();
 
@@ -146,21 +146,19 @@ ${items}
 }
 
 feedRoutes.get("/feed.atom", async (c) => {
-	const cached = await redis.get(ATOM_CACHE_KEY);
-	if (cached) {
-		return c.text(cached, 200, { "Content-Type": "application/atom+xml; charset=utf-8" });
-	}
-	const xml = buildAtom(await loadFeedPosts());
-	await redis.set(ATOM_CACHE_KEY, xml, "EX", CACHE_TTL);
+	const xml = await cachedOrBuild({
+		cacheKey: ATOM_CACHE_KEY,
+		cacheTtlSeconds: CACHE_TTL,
+		build: async () => buildAtom(await loadFeedPosts()),
+	});
 	return c.text(xml, 200, { "Content-Type": "application/atom+xml; charset=utf-8" });
 });
 
 feedRoutes.get("/feed.xml", async (c) => {
-	const cached = await redis.get(RSS_CACHE_KEY);
-	if (cached) {
-		return c.text(cached, 200, { "Content-Type": "application/rss+xml; charset=utf-8" });
-	}
-	const xml = buildRss(await loadFeedPosts());
-	await redis.set(RSS_CACHE_KEY, xml, "EX", CACHE_TTL);
+	const xml = await cachedOrBuild({
+		cacheKey: RSS_CACHE_KEY,
+		cacheTtlSeconds: CACHE_TTL,
+		build: async () => buildRss(await loadFeedPosts()),
+	});
 	return c.text(xml, 200, { "Content-Type": "application/rss+xml; charset=utf-8" });
 });

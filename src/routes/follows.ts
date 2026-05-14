@@ -72,15 +72,16 @@ followsRoutes.post("/:username", followMutationLimit, authMiddleware, async (c) 
 		return c.json({ following: true, emailEnabled: existing.emailEnabled });
 	}
 
-	const follow = await prisma.follow.create({
-		data: { followerId: me.sub, followingId: target.id },
-	});
-
-	// Notify the user being followed.
-	await createNotification({
-		userId: target.id,
-		actorId: me.sub,
-		type: "follow",
+	// Follow + "you have a new follower" notification commit atomically.
+	// Previously the two writes were sequential — if the second one failed,
+	// the followee never saw a notification about a follow that did happen,
+	// which is exactly the kind of "ghost state" that's painful to debug later.
+	const follow = await prisma.$transaction(async (tx) => {
+		const f = await tx.follow.create({
+			data: { followerId: me.sub, followingId: target.id },
+		});
+		await createNotification({ userId: target.id, actorId: me.sub, type: "follow" }, tx);
+		return f;
 	});
 
 	return c.json({ following: true, emailEnabled: follow.emailEnabled }, 201);

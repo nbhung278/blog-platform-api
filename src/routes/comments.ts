@@ -186,29 +186,40 @@ commentsRoutes.post(
 			directParentAuthorId = parent.userId;
 		}
 
-		const created = await prisma.comment.create({
-			data: {
-				postId,
-				userId: me.sub,
-				parentId: resolvedParentId,
-				content,
-			},
-			include: {
-				user: { select: { id: true, name: true, username: true, avatarUrl: true } },
-			},
-		});
-
-		// Notify only the parent commenter on a reply. Top-level comments do NOT
-		// notify the post author — keeps the inbox quiet on popular posts.
-		if (resolvedParentId && directParentAuthorId) {
-			await createNotification({
-				userId: directParentAuthorId,
-				actorId: me.sub,
-				type: "comment_reply",
-				postId: post.id,
-				commentId: created.id,
+		// Atomic insert: comment + reply notification commit together. Without
+		// this, a comment could be persisted while its reply notification is
+		// silently dropped (network blip between the two statements), and the
+		// parent comment author would never know they were replied to.
+		const created = await prisma.$transaction(async (tx) => {
+			const comment = await tx.comment.create({
+				data: {
+					postId,
+					userId: me.sub,
+					parentId: resolvedParentId,
+					content,
+				},
+				include: {
+					user: { select: { id: true, name: true, username: true, avatarUrl: true } },
+				},
 			});
-		}
+
+			// Notify only the parent commenter on a reply. Top-level comments do NOT
+			// notify the post author — keeps the inbox quiet on popular posts.
+			if (resolvedParentId && directParentAuthorId) {
+				await createNotification(
+					{
+						userId: directParentAuthorId,
+						actorId: me.sub,
+						type: "comment_reply",
+						postId: post.id,
+						commentId: comment.id,
+					},
+					tx,
+				);
+			}
+
+			return comment;
+		});
 
 		return c.json(serialize(created, 0), 201);
 	},

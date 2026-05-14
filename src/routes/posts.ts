@@ -582,6 +582,13 @@ postsRoutes.post(
 			},
 		});
 
+		// Fan-out follower notifications is intentionally *not* inside a
+		// transaction with the post create above: notifying every follower
+		// individually can hold a DB lock for seconds on popular authors and
+		// would force the create itself to wait. If a single notification fails
+		// the post is still published correctly; the worst case is a follower
+		// who misses one event in their feed, which they'll see again on next
+		// list refresh. For stronger guarantees, move this to an outbox queue.
 		if (post.status === "published") {
 			await notifyFollowersOfPost(user.sub, post.id, "post_published");
 		}
@@ -591,96 +598,105 @@ postsRoutes.post(
 );
 
 // [auth] Update post — author can update own, admin (write:any) can update any.
-postsRoutes.patch("/:id", authMiddleware, zValidator("json", updatePostSchema), async (c) => {
-	const user = c.get("user");
-	const postId = c.req.param("id");
-	const body = c.req.valid("json");
+// Rate limit at 60/hour per IP: enough for active editors saving drafts every
+// few seconds, but capped so a buggy auto-save loop or scripted client can't
+// flood the DB with PATCH (each one re-indexes categories + fires fan-out).
+postsRoutes.patch(
+	"/:id",
+	ipRateLimit({ keyPrefix: "post-update", limit: 60, windowSeconds: 60 * 60 }),
+	authMiddleware,
+	zValidator("json", updatePostSchema),
+	async (c) => {
+		const user = c.get("user");
+		const postId = c.req.param("id");
+		const body = c.req.valid("json");
 
-	const existing = await prisma.post.findUnique({
-		where: { id: postId },
-		select: {
-			version: true,
-			userId: true,
-			status: true,
-			publishedAt: true,
-			deletedAt: true,
-			coverUrl: true,
-		},
-	});
+		const existing = await prisma.post.findUnique({
+			where: { id: postId },
+			select: {
+				version: true,
+				userId: true,
+				status: true,
+				publishedAt: true,
+				deletedAt: true,
+				coverUrl: true,
+			},
+		});
 
-	if (!existing || existing.deletedAt) {
-		return c.json({ error: "Post not found" }, 404);
-	}
+		if (!existing || existing.deletedAt) {
+			return c.json({ error: "Post not found" }, 404);
+		}
 
-	const isOwner = existing.userId === user.sub;
-	const canWriteAny = user.permissions.includes(PERMISSIONS.POST_WRITE_ANY);
-	const canWriteOwn = user.permissions.includes(PERMISSIONS.POST_WRITE_OWN);
+		const isOwner = existing.userId === user.sub;
+		const canWriteAny = user.permissions.includes(PERMISSIONS.POST_WRITE_ANY);
+		const canWriteOwn = user.permissions.includes(PERMISSIONS.POST_WRITE_OWN);
 
-	if (!canWriteAny && !(isOwner && canWriteOwn)) {
-		return c.json({ error: "Forbidden" }, 403);
-	}
+		if (!canWriteAny && !(isOwner && canWriteOwn)) {
+			return c.json({ error: "Forbidden" }, 403);
+		}
 
-	const guard = assertCanSetStatus(body.status, user.permissions);
-	if (!guard.ok) {
-		return c.json({ error: guard.reason }, 403);
-	}
+		const guard = assertCanSetStatus(body.status, user.permissions);
+		if (!guard.ok) {
+			return c.json({ error: guard.reason }, 403);
+		}
 
-	if (existing.version !== body.version) {
-		return c.json({ error: "Conflict" }, 409);
-	}
+		if (existing.version !== body.version) {
+			return c.json({ error: "Conflict" }, 409);
+		}
 
-	const { version, categoryIds, ...updates } = body;
-	const readingTime = updates.contentMd ? calcReadingTime(updates.contentMd) : undefined;
-	// Set publishedAt when transitioning to published for the first time.
-	const isFirstPublish = updates.status === "published" && existing.status !== "published";
-	const publishedAt = isFirstPublish ? new Date() : undefined;
+		const { version, categoryIds, ...updates } = body;
+		const readingTime = updates.contentMd ? calcReadingTime(updates.contentMd) : undefined;
+		// Set publishedAt when transitioning to published for the first time.
+		const isFirstPublish = updates.status === "published" && existing.status !== "published";
+		const publishedAt = isFirstPublish ? new Date() : undefined;
 
-	// Followers care about meaningful content changes — title or body. Tag
-	// edits, cover swaps, etc. shouldn't fan-out notifications.
-	const isPublishedEdit =
-		existing.status === "published" &&
-		(updates.status === undefined || updates.status === "published") &&
-		(updates.title !== undefined || updates.contentMd !== undefined);
+		// Followers care about meaningful content changes — title or body. Tag
+		// edits, cover swaps, etc. shouldn't fan-out notifications.
+		const isPublishedEdit =
+			existing.status === "published" &&
+			(updates.status === undefined || updates.status === "published") &&
+			(updates.title !== undefined || updates.contentMd !== undefined);
 
-	const updated = await prisma.post.update({
-		where: { id: postId },
-		data: {
-			...updates,
-			...(readingTime !== undefined && { readingTime }),
-			...(publishedAt !== undefined && { publishedAt }),
-			version: version + 1,
-			...(categoryIds !== undefined && {
-				categories: {
-					deleteMany: {},
-					create: categoryIds.map((categoryId) => ({ categoryId })),
-				},
-			}),
-		},
-		include: {
-			categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
-		},
-	});
+		const updated = await prisma.post.update({
+			where: { id: postId },
+			data: {
+				...updates,
+				...(readingTime !== undefined && { readingTime }),
+				...(publishedAt !== undefined && { publishedAt }),
+				version: version + 1,
+				...(categoryIds !== undefined && {
+					categories: {
+						deleteMany: {},
+						create: categoryIds.map((categoryId) => ({ categoryId })),
+					},
+				}),
+			},
+			include: {
+				categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
+			},
+		});
 
-	if (isFirstPublish) {
-		await notifyFollowersOfPost(existing.userId, postId, "post_published");
-	} else if (isPublishedEdit) {
-		await notifyFollowersOfPost(existing.userId, postId, "post_updated");
-	}
+		if (isFirstPublish) {
+			await notifyFollowersOfPost(existing.userId, postId, "post_published");
+		} else if (isPublishedEdit) {
+			await notifyFollowersOfPost(existing.userId, postId, "post_updated");
+		}
 
-	// Cover replaced or cleared → free the old object. Compare by key (not URL)
-	// so a no-op rehost that returns the same key doesn't trigger a delete of
-	// the file we just kept. Ownership-scoped extractor refuses to return a
-	// key that doesn't live under the post owner's prefix — prevents a hostile
-	// PATCH where coverUrl points at someone else's file from triggering its
-	// deletion on the next update.
-	if (updates.coverUrl !== undefined) {
-		const oldKey = extractOwnedS3Key(existing.coverUrl, existing.userId);
-		const newKey = extractOwnedS3Key(updates.coverUrl, existing.userId);
-		if (oldKey && oldKey !== newKey) void deleteObject(oldKey);
-	}
+		// Cover replaced or cleared → free the old object. Compare by key (not URL)
+		// so a no-op rehost that returns the same key doesn't trigger a delete of
+		// the file we just kept. Ownership-scoped extractor refuses to return a
+		// key that doesn't live under the post owner's prefix — prevents a hostile
+		// PATCH where coverUrl points at someone else's file from triggering its
+		// deletion on the next update.
+		if (updates.coverUrl !== undefined) {
+			const oldKey = extractOwnedS3Key(existing.coverUrl, existing.userId);
+			const newKey = extractOwnedS3Key(updates.coverUrl, existing.userId);
+			if (oldKey && oldKey !== newKey) void deleteObject(oldKey);
+		}
 
-	return c.json(updated);
-});
+		return c.json(updated);
+	},
+);
 
 // [auth] Delete post — owner with delete:own, or anyone with delete:any
 postsRoutes.delete("/:id", authMiddleware, async (c) => {

@@ -39,12 +39,27 @@ export function removeSubscriber(userId: string, ws: WS) {
 	if (set.size === 0) subscribers.delete(userId);
 }
 
+// Drop sends to clients whose outbound buffer is already this far behind. The
+// threshold is generous (~1 MB) — typical notification payloads are <1 KB, so
+// hitting this means the socket is dead/stuck and Bun is queueing pending
+// writes in memory. Letting it grow unbounded is how a single slow client OOMs
+// the process.
+const WS_BACKPRESSURE_DROP_BYTES = 1_000_000;
+
 export function publishToUser(userId: string, message: RealtimeMessage) {
 	const set = subscribers.get(userId);
 	if (!set) return;
 	const payload = JSON.stringify(message);
 	for (const ws of set) {
 		try {
+			// Bun exposes the OS-level send-buffer fill via `getBufferedAmount()`.
+			// When a client stops reading, this number grows; sending more just
+			// enlarges the queue. Skipping the send here keeps memory bounded —
+			// the next publish either succeeds (buffer drained) or the socket is
+			// reaped by the close handler. We don't close the socket here because
+			// legitimate short stalls (mobile network handover) recover within
+			// seconds.
+			if (ws.getBufferedAmount() > WS_BACKPRESSURE_DROP_BYTES) continue;
 			ws.send(payload);
 		} catch {
 			// Ignore — client likely disconnected; the close handler will clean up.

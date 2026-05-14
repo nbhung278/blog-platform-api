@@ -319,9 +319,12 @@ conversationsRoutes.post(
 	},
 );
 
-// Toggle a reaction on a message
+// Toggle a reaction on a message. Each toggle does 3 DB queries (findUnique,
+// findMany, upsert), so an emoji-spamming client could cheaply DOS this route.
+// 90 toggles/min per IP is well above any legit reaction-clicking pattern.
 conversationsRoutes.post(
 	"/:id/messages/:msgId/reactions",
+	ipRateLimit({ keyPrefix: "reaction-toggle", limit: 90, windowSeconds: 60 }),
 	zValidator("json", z.object({ emoji: z.enum(VALID_EMOJIS) })),
 	async (c) => {
 		const me = c.get("user");

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { prisma } from "../db";
-import { redis } from "../lib/redis";
 import { env } from "../lib/env";
+import { cachedOrBuild } from "../lib/cache-lock";
 
 export const sitemapRoutes = new Hono();
 
@@ -59,25 +59,23 @@ function buildSitemap(
 }
 
 sitemapRoutes.get("/", async (c) => {
-	const cached = await redis.get(CACHE_KEY);
-	if (cached) {
-		return c.text(cached, 200, { "Content-Type": "application/xml" });
-	}
-
-	const [posts, categories] = await Promise.all([
-		prisma.post.findMany({
-			where: { status: "published", deletedAt: null },
-			select: { slug: true, updatedAt: true, user: { select: { username: true } } },
-			orderBy: { updatedAt: "desc" },
-		}),
-		prisma.category.findMany({
-			select: { name: true },
-			orderBy: { name: "asc" },
-		}),
-	]);
-
-	const xml = buildSitemap(posts, categories);
-	await redis.set(CACHE_KEY, xml, "EX", CACHE_TTL);
-
+	const xml = await cachedOrBuild({
+		cacheKey: CACHE_KEY,
+		cacheTtlSeconds: CACHE_TTL,
+		build: async () => {
+			const [posts, categories] = await Promise.all([
+				prisma.post.findMany({
+					where: { status: "published", deletedAt: null },
+					select: { slug: true, updatedAt: true, user: { select: { username: true } } },
+					orderBy: { updatedAt: "desc" },
+				}),
+				prisma.category.findMany({
+					select: { name: true },
+					orderBy: { name: "asc" },
+				}),
+			]);
+			return buildSitemap(posts, categories);
+		},
+	});
 	return c.text(xml, 200, { "Content-Type": "application/xml" });
 });

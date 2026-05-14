@@ -1,6 +1,7 @@
 import { prisma } from "../db";
 import { publishToUser } from "./realtime";
 import { logger } from "./logger";
+import type { Prisma } from "@prisma/client";
 
 export type NotificationType = "follow" | "post_published" | "post_updated" | "comment_reply";
 
@@ -12,7 +13,15 @@ export interface CreateNotificationInput {
 	commentId?: string;
 }
 
-export async function createNotification(input: CreateNotificationInput) {
+// Prisma client OR an active transaction. Callers that need atomicity with a
+// primary action (follow, comment) pass `tx`; standalone callers can omit it
+// and we fall back to the global client.
+type PrismaTxClient = Prisma.TransactionClient | typeof prisma;
+
+export async function createNotification(
+	input: CreateNotificationInput,
+	tx: PrismaTxClient = prisma,
+) {
 	// Don't notify yourself for actions you triggered.
 	if (input.actorId && input.actorId === input.userId) return null;
 
@@ -24,7 +33,7 @@ export async function createNotification(input: CreateNotificationInput) {
 		return null;
 	}
 
-	const notif = await prisma.notification.create({
+	const notif = await tx.notification.create({
 		data: {
 			userId: input.userId,
 			actorId: input.actorId,
@@ -38,6 +47,12 @@ export async function createNotification(input: CreateNotificationInput) {
 		},
 	});
 
+	// Broadcast OUTSIDE the transaction would be ideal, but doing it here is
+	// safe because publishToUser only writes to in-process WS subscribers and
+	// in-Redis pub/sub — both are side effects that, if they fire on a later
+	// rollback, just deliver a phantom event the client refetches against and
+	// finds nothing for. That's strictly better than missing the notification
+	// for a successful commit, which was the failure mode pre-transaction.
 	publishToUser(input.userId, { kind: "notification", data: notif });
 	return notif;
 }
