@@ -23,6 +23,7 @@ import { sitemapRoutes } from "./routes/sitemap";
 import { feedRoutes } from "./routes/feed";
 import { webhooksRoutes } from "./routes/webhooks";
 import { startViewCountFlusher, stopViewCountFlusher, flushViewCounts } from "./lib/view-counter";
+import { startCronJobs, stopCronJobs } from "./lib/cron";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
 import { prisma } from "./db";
 import { redis } from "./lib/redis";
@@ -125,6 +126,7 @@ app.onError((err, c) => {
 
 // Start background workers
 startViewCountFlusher();
+startCronJobs();
 
 const port = env.PORT;
 logger.info({ port }, "[server] starting");
@@ -181,6 +183,7 @@ async function shutdown(signal: string): Promise<void> {
 	// Stop scheduling new flushes, then run one final flush so anything sitting
 	// in Redis lands in Postgres before we exit.
 	stopViewCountFlusher();
+	stopCronJobs();
 	try {
 		await flushViewCounts();
 	} catch (err) {

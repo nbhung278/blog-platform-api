@@ -20,9 +20,9 @@ const upsertRoleSchema = z.object({
 		.min(2)
 		.max(40)
 		.regex(/^[a-z0-9_]+$/),
-	name: z.string().min(1),
-	description: z.string().nullable().optional(),
-	permissionKeys: z.array(z.string()).default([]),
+	name: z.string().min(1).max(100),
+	description: z.string().max(500).nullable().optional(),
+	permissionKeys: z.array(z.string().max(64)).max(100).default([]),
 });
 
 rolesRoutes.get("/", async (c) => {

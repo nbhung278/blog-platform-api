@@ -7,6 +7,7 @@ import { authMiddleware, type JWTPayload } from "../middleware/auth";
 import { ipRateLimit } from "../middleware/rate-limit";
 import { publishToUser } from "../lib/realtime";
 import { isAllowedMediaUrl } from "../lib/url-allowlist";
+import { setPrivateNoStore } from "../lib/cache-headers";
 
 export const conversationsRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
 
@@ -122,6 +123,7 @@ conversationsRoutes.get("/", async (c) => {
 		updatedAt: conv.updatedAt,
 	}));
 
+	setPrivateNoStore(c);
 	return c.json(result);
 });
 
@@ -241,6 +243,7 @@ conversationsRoutes.get(
 			reactions: buildReactions(m.reactions, me.sub),
 		}));
 
+		setPrivateNoStore(c);
 		return c.json({
 			items,
 			nextCursor: hasMore ? trimmed[0]?.id : null,
@@ -342,22 +345,51 @@ conversationsRoutes.post(
 		});
 		if (!message) return c.json({ error: "Message not found" }, 404);
 
-		const existing = await prisma.messageReaction.findUnique({
-			where: { messageId_userId: { messageId: msgId, userId: me.sub } },
-		});
-
-		if (existing && existing.emoji === emoji) {
-			// Same emoji — remove it (toggle off)
-			await prisma.messageReaction.delete({
-				where: { messageId_userId: { messageId: msgId, userId: me.sub } },
-			});
-		} else {
-			// Different emoji or no reaction — upsert
-			await prisma.messageReaction.upsert({
-				where: { messageId_userId: { messageId: msgId, userId: me.sub } },
-				create: { messageId: msgId, userId: me.sub, emoji },
-				update: { emoji },
-			});
+		// Toggle in a single Serializable tx so two parallel taps from the same
+		// user can't both read "no reaction yet" and both create rows. Without
+		// this, the second tap would either overwrite the first (different
+		// emoji) or, worse, the delete-branch path could race with the
+		// upsert-branch path on the same row.
+		//
+		// Postgres surfaces concurrent-update collisions as 40001 (P2034 in
+		// Prisma's error model). Retry with a small backoff so two tabs
+		// spam-tapping the same message can't both abort. Per-IP rate limit
+		// (90/min) already caps overall volume, so this loop never sustains.
+		const MAX_ATTEMPTS = 5;
+		let attempt = 0;
+		while (true) {
+			try {
+				await prisma.$transaction(
+					async (tx) => {
+						const existing = await tx.messageReaction.findUnique({
+							where: { messageId_userId: { messageId: msgId, userId: me.sub } },
+						});
+						if (existing && existing.emoji === emoji) {
+							await tx.messageReaction.delete({
+								where: { messageId_userId: { messageId: msgId, userId: me.sub } },
+							});
+						} else {
+							await tx.messageReaction.upsert({
+								where: { messageId_userId: { messageId: msgId, userId: me.sub } },
+								create: { messageId: msgId, userId: me.sub, emoji },
+								update: { emoji },
+							});
+						}
+					},
+					{ isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+				);
+				break;
+			} catch (err) {
+				attempt += 1;
+				const code = err instanceof Prisma.PrismaClientKnownRequestError ? err.code : undefined;
+				if (code === "P2034" && attempt < MAX_ATTEMPTS) {
+					// Tiny randomized backoff so retrying losers don't keep
+					// colliding with each other on the next attempt.
+					await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 25)));
+					continue;
+				}
+				throw err;
+			}
 		}
 
 		const allReactions = await prisma.messageReaction.findMany({

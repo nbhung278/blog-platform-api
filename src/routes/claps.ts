@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, type JWTPayload, tryGetUser } from "../middleware/auth";
 import { ipRateLimit } from "../middleware/rate-limit";
+import { setPrivateNoStore } from "../lib/cache-headers";
 
 // Per-user cap, mirroring Medium. The client batches clicks and sends a delta;
 // the server clamps so a misbehaving client can't push past the cap.
@@ -83,6 +84,15 @@ clapsRoutes.get("/posts/:postId", async (c) => {
 	]);
 	if (!post) return c.json({ error: "Post not found" }, 404);
 
+	// Response shape changes based on whether the caller is signed in
+	// (myCount). If we let a public cache serve this, viewer A's myCount would
+	// leak to viewer B. Mark per-user when authed; cache-public for anonymous
+	// readers since the post total alone is fine to share at the edge.
+	if (viewer) {
+		setPrivateNoStore(c);
+	} else {
+		c.header("Cache-Control", "public, s-maxage=30, stale-while-revalidate=60");
+	}
 	return c.json({
 		total: post.clapCount,
 		myCount: myRow?.count ?? 0,

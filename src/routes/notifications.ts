@@ -5,6 +5,7 @@ import { prisma } from "../db";
 import { authMiddleware, type JWTPayload } from "../middleware/auth";
 import { ipRateLimit } from "../middleware/rate-limit";
 import { publishToUser } from "../lib/realtime";
+import { setPrivateNoStore } from "../lib/cache-headers";
 
 // Mark-read floods would echo unread_count over every connected socket; cap
 // at 120/min/IP so a real user clicking many notifications is fine but a
@@ -43,6 +44,7 @@ notificationsRoutes.get("/", authMiddleware, zValidator("query", listSchema), as
 
 	const hasMore = items.length > limit;
 	const trimmed = hasMore ? items.slice(0, limit) : items;
+	setPrivateNoStore(c);
 	return c.json({
 		items: trimmed,
 		nextCursor: hasMore ? trimmed[trimmed.length - 1]?.id : null,
@@ -54,6 +56,7 @@ notificationsRoutes.get("/unread-count", authMiddleware, async (c) => {
 	const count = await prisma.notification.count({
 		where: { userId: me.sub, isRead: false },
 	});
+	setPrivateNoStore(c);
 	return c.json({ count });
 });
 

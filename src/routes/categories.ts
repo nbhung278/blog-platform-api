@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
@@ -21,7 +22,7 @@ function slugify(name: string): string {
 
 const categorySchema = z.object({
 	name: z.string().min(1).max(100),
-	description: z.string().optional(),
+	description: z.string().max(500).optional(),
 });
 
 // Public: list all categories (includes postCount)
@@ -53,15 +54,21 @@ categoriesRoutes.post(
 		const { name, description } = c.req.valid("json");
 		const slug = slugify(name);
 
-		const existing = await prisma.category.findFirst({
-			where: { OR: [{ name }, { slug }] },
-		});
-		if (existing) return c.json({ error: "Category name already exists" }, 409);
-
-		const category = await prisma.category.create({
-			data: { name, slug, description },
-		});
-		return c.json(category, 201);
+		// Use the unique constraint as the source of truth: two concurrent
+		// admins racing to create the same category would both pass a pre-check
+		// findFirst, then one would still hit P2002 from the @unique on name +
+		// slug. Skip the pre-check and let the catch path return 409 either way.
+		try {
+			const category = await prisma.category.create({
+				data: { name, slug, description },
+			});
+			return c.json(category, 201);
+		} catch (err) {
+			if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+				return c.json({ error: "Category name already exists" }, 409);
+			}
+			throw err;
+		}
 	},
 );
 
@@ -85,8 +92,15 @@ categoriesRoutes.patch(
 		}
 		if (body.description !== undefined) data.description = body.description;
 
-		const updated = await prisma.category.update({ where: { id }, data });
-		return c.json(updated);
+		try {
+			const updated = await prisma.category.update({ where: { id }, data });
+			return c.json(updated);
+		} catch (err) {
+			if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+				return c.json({ error: "Category name already exists" }, 409);
+			}
+			throw err;
+		}
 	},
 );
 

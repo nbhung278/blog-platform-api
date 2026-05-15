@@ -18,20 +18,20 @@ usersRoutes.use(
 );
 
 const createUserSchema = z.object({
-	email: z.string().email(),
+	email: z.string().email().max(254),
 	password: passwordSchema,
-	name: z.string().min(1),
+	name: z.string().min(1).max(100),
 	username: z
 		.string()
 		.min(3)
 		.max(30)
 		.regex(/^[a-z0-9-]+$/),
-	roleIds: z.array(z.string().uuid()).default([]),
+	roleIds: z.array(z.string().uuid()).max(20).default([]),
 });
 
 const updateUserSchema = z.object({
-	email: z.string().email().optional(),
-	name: z.string().min(1).optional(),
+	email: z.string().email().max(254).optional(),
+	name: z.string().min(1).max(100).optional(),
 	username: z
 		.string()
 		.min(3)
@@ -39,7 +39,7 @@ const updateUserSchema = z.object({
 		.regex(/^[a-z0-9-]+$/)
 		.optional(),
 	password: passwordSchema.optional(),
-	roleIds: z.array(z.string().uuid()).optional(),
+	roleIds: z.array(z.string().uuid()).max(20).optional(),
 });
 
 usersRoutes.get("/", async (c) => {

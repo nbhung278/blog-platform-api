@@ -22,6 +22,7 @@ import {
 } from "../lib/permissions";
 import { loadUserRolesAndPermissions } from "../lib/user-permissions";
 import { env } from "../lib/env";
+import { setPrivateNoStore } from "../lib/cache-headers";
 import {
 	bumpTokenVersion,
 	consumeAndRotateRefreshToken,
@@ -839,6 +840,7 @@ authRoutes.get("/me", authMiddleware, async (c) => {
 	}
 
 	const { roles: _userRoles, passwordHash, googleId, ...profile } = user;
+	setPrivateNoStore(c);
 	return c.json({
 		...profile,
 		hasPassword: passwordHash !== null,

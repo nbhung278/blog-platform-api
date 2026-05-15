@@ -1,10 +1,12 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, type JWTPayload } from "../middleware/auth";
 import { ipRateLimit } from "../middleware/rate-limit";
 import { createNotification } from "../lib/notifications";
+import { setPrivateNoStore } from "../lib/cache-headers";
 
 // Cap follow/unfollow churn at 60/min/IP — generous for a real user, low
 // enough to dampen scripted graph spam.
@@ -52,6 +54,7 @@ followsRoutes.get("/:username/me", authMiddleware, async (c) => {
 		where: { followerId_followingId: { followerId: me.sub, followingId: target.id } },
 		select: { emailEnabled: true, createdAt: true },
 	});
+	setPrivateNoStore(c);
 	if (!row) return c.json({ following: false });
 	return c.json({ following: true, emailEnabled: row.emailEnabled, since: row.createdAt });
 });
@@ -64,7 +67,10 @@ followsRoutes.post("/:username", followMutationLimit, authMiddleware, async (c) 
 	if (target.id === me.sub) return c.json({ error: "Cannot follow yourself" }, 400);
 
 	// Idempotent: re-following an already-followed user is a no-op (200) so the
-	// UI doesn't have to special-case race conditions.
+	// UI doesn't have to special-case race conditions. We still try create
+	// below and catch the unique-violation as the canonical idempotency path —
+	// the find here is just a fast-path that avoids the tx + notification work
+	// in the common case.
 	const existing = await prisma.follow.findUnique({
 		where: { followerId_followingId: { followerId: me.sub, followingId: target.id } },
 	});
@@ -76,15 +82,30 @@ followsRoutes.post("/:username", followMutationLimit, authMiddleware, async (c) 
 	// Previously the two writes were sequential — if the second one failed,
 	// the followee never saw a notification about a follow that did happen,
 	// which is exactly the kind of "ghost state" that's painful to debug later.
-	const follow = await prisma.$transaction(async (tx) => {
-		const f = await tx.follow.create({
-			data: { followerId: me.sub, followingId: target.id },
+	//
+	// Two concurrent POSTs from the same user can both see existing===null
+	// above and race here; catch P2002 (unique violation on
+	// follower_id+following_id) and return the idempotent 200 in that case
+	// rather than 500-ing the second request.
+	try {
+		const follow = await prisma.$transaction(async (tx) => {
+			const f = await tx.follow.create({
+				data: { followerId: me.sub, followingId: target.id },
+			});
+			await createNotification({ userId: target.id, actorId: me.sub, type: "follow" }, tx);
+			return f;
 		});
-		await createNotification({ userId: target.id, actorId: me.sub, type: "follow" }, tx);
-		return f;
-	});
-
-	return c.json({ following: true, emailEnabled: follow.emailEnabled }, 201);
+		return c.json({ following: true, emailEnabled: follow.emailEnabled }, 201);
+	} catch (err) {
+		if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+			const winner = await prisma.follow.findUnique({
+				where: { followerId_followingId: { followerId: me.sub, followingId: target.id } },
+				select: { emailEnabled: true },
+			});
+			return c.json({ following: true, emailEnabled: winner?.emailEnabled ?? true });
+		}
+		throw err;
+	}
 });
 
 followsRoutes.delete("/:username", followMutationLimit, authMiddleware, async (c) => {

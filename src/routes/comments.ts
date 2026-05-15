@@ -5,6 +5,7 @@ import { prisma } from "../db";
 import { authMiddleware, type JWTPayload, tryGetUser } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { ipRateLimit } from "../middleware/rate-limit";
+import { idempotency } from "../middleware/idempotency";
 import { createNotification } from "../lib/notifications";
 
 const writeLimit = ipRateLimit({ keyPrefix: "comment-write", limit: 30, windowSeconds: 60 });
@@ -154,6 +155,7 @@ commentsRoutes.post(
 	"/posts/:postId",
 	writeLimit,
 	authMiddleware,
+	idempotency({ keyPrefix: "comment-create" }),
 	zValidator("json", createSchema),
 	async (c) => {
 		const postId = c.req.param("postId");

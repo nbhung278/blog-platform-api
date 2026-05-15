@@ -11,6 +11,8 @@ import { notifyFollowersOfPost } from "../lib/notifications";
 import { logger } from "../lib/logger";
 import { isAllowedMediaUrl } from "../lib/url-allowlist";
 import { deleteObject, extractOwnedS3Key, extractInlineImageKeys } from "../lib/s3";
+import { setPrivateNoStore } from "../lib/cache-headers";
+import { idempotency } from "../middleware/idempotency";
 
 export const postsRoutes = new Hono();
 
@@ -163,6 +165,7 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 		}),
 	]);
 
+	setPrivateNoStore(c);
 	return c.json({ data: await withPendingViews(result), total, page, limit });
 });
 
@@ -650,6 +653,11 @@ postsRoutes.get(
 		if (!author) return c.json([]);
 
 		const isOwner = viewer?.sub === author.id;
+		// Clamp page-size: without a take, a malicious caller can request all
+		// posts for prolific authors and amplify a single request into a large
+		// DB read + serialization cost. 50 matches the other public list
+		// endpoints in this file.
+		const limit = Math.min(50, Math.max(1, Number(c.req.query("limit")) || 20));
 
 		const result = await prisma.post.findMany({
 			where: {
@@ -660,9 +668,11 @@ postsRoutes.get(
 					: { status: "published" }),
 			},
 			orderBy: [{ publishedAt: "desc" }, { updatedAt: "desc" }],
+			take: limit,
 			select: POST_LIST_SELECT,
 		});
 
+		if (isOwner) setPrivateNoStore(c);
 		return c.json(await withPendingViews(result));
 	},
 );
@@ -672,6 +682,7 @@ postsRoutes.post(
 	"/",
 	ipRateLimit({ keyPrefix: "post-create", limit: 20, windowSeconds: 60 * 60 }),
 	authMiddleware,
+	idempotency({ keyPrefix: "post-create" }),
 	requireAnyPermission(PERMISSIONS.POST_WRITE_OWN, PERMISSIONS.POST_WRITE_ANY),
 	zValidator("json", createPostSchema),
 	async (c) => {

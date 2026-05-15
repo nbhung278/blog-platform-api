@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "../db";
 import { authMiddleware } from "../middleware/auth";
 import { ipRateLimit } from "../middleware/rate-limit";
+import { setPrivateNoStore } from "../lib/cache-headers";
 
 export const readingProgressRoutes = new Hono();
 
@@ -95,6 +96,7 @@ readingProgressRoutes.get("/:postId", authMiddleware, async (c) => {
 		select: { progress: true, scrollY: true, updatedAt: true },
 	});
 
+	setPrivateNoStore(c);
 	if (!row) return c.json({ progress: 0, scrollY: 0, updatedAt: null });
 	return c.json(row);
 });
@@ -140,6 +142,7 @@ readingProgressRoutes.get(
 			},
 		});
 
+		setPrivateNoStore(c);
 		return c.json({ items: rows });
 	},
 );

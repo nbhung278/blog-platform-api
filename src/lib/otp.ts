@@ -151,16 +151,22 @@ export async function verifyOtp<T extends OtpPayload>(
 const RESEND_WINDOW_SECONDS = 60 * 60;
 const RESEND_LIMIT = 5;
 
+// Atomically INCR and, if the key was just created (count == 1), set its TTL.
+// Doing INCR then EXPIRE in two separate commands lets the process crash —
+// or Redis fail over — between them, in which case the counter would persist
+// forever and lock the identifier out. A Lua script runs as a single Redis
+// operation so this can't tear.
+const CAN_RESEND_LUA = `
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+`;
+
 export async function canResend(purpose: OtpPurpose, identifier: string): Promise<boolean> {
 	const k = `otp:resend:${purpose}:${identifier.toLowerCase()}`;
-	// INCR creates the key with value 1 if it doesn't exist. We then set the TTL
-	// only on the first increment (NX = "only if not already set"). This avoids
-	// the SET-NX-then-INCR race where the key expires between the two commands,
-	// causing INCR to create a persistent key with no TTL.
-	const count = await redis.incr(k);
-	if (count === 1) {
-		await redis.expire(k, RESEND_WINDOW_SECONDS);
-	}
+	const count = Number(await redis.eval(CAN_RESEND_LUA, 1, k, String(RESEND_WINDOW_SECONDS)));
 	return count <= RESEND_LIMIT;
 }
 

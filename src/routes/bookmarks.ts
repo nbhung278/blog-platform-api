@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { prisma } from "../db";
 import { authMiddleware, type JWTPayload } from "../middleware/auth";
 import { ipRateLimit } from "../middleware/rate-limit";
+import { setPrivateNoStore } from "../lib/cache-headers";
 
 const bookmarkLimit = ipRateLimit({ keyPrefix: "bookmark", limit: 120, windowSeconds: 60 });
 
@@ -39,6 +40,7 @@ bookmarksRoutes.get("/", authMiddleware, async (c) => {
 	const items = hasMore ? rows.slice(0, limit) : rows;
 	const nextCursor = hasMore ? items[items.length - 1].postId : null;
 
+	setPrivateNoStore(c);
 	return c.json({
 		items: items.map((r) => ({ ...r.post, savedAt: r.createdAt })),
 		nextCursor,
@@ -53,6 +55,7 @@ bookmarksRoutes.get("/posts/:postId", authMiddleware, async (c) => {
 		where: { userId_postId: { userId: me.sub, postId } },
 		select: { createdAt: true },
 	});
+	setPrivateNoStore(c);
 	return c.json({ saved: !!row, savedAt: row?.createdAt ?? null });
 });
 
