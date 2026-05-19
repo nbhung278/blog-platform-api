@@ -13,6 +13,8 @@ import { isAllowedMediaUrl } from "../lib/url-allowlist";
 import { deleteObject, extractOwnedS3Key, extractInlineImageKeys } from "../lib/s3";
 import { setPrivateNoStore } from "../lib/cache-headers";
 import { idempotency } from "../middleware/idempotency";
+import { submitToIndexNow } from "../lib/indexnow";
+import { env } from "../lib/env";
 
 export const postsRoutes = new Hono();
 
@@ -731,6 +733,9 @@ postsRoutes.post(
 		// list refresh. For stronger guarantees, move this to an outbox queue.
 		if (post.status === "published") {
 			await notifyFollowersOfPost(user.sub, post.id, "post_published");
+			// Fire-and-forget — IndexNow accepts the canonical SPA URL (not the
+			// /share/ proxy). Bots/Google crawl /blog/<u>/<slug>.
+			submitToIndexNow(`${env.APP_URL}/blog/${user.username}/${post.slug}`);
 		}
 
 		return c.json(post, 201);
@@ -813,6 +818,7 @@ postsRoutes.patch(
 			},
 			include: {
 				categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
+				user: { select: { username: true } },
 			},
 		});
 
@@ -820,6 +826,13 @@ postsRoutes.patch(
 			await notifyFollowersOfPost(existing.userId, postId, "post_published");
 		} else if (isPublishedEdit) {
 			await notifyFollowersOfPost(existing.userId, postId, "post_updated");
+		}
+
+		// IndexNow: notify on first publish (new URL discovery) AND on content
+		// edit of already-published posts (Google re-crawls the canonical URL
+		// to pick up the new content). Skip drafts and status reverts.
+		if (isFirstPublish || isPublishedEdit) {
+			submitToIndexNow(`${env.APP_URL}/blog/${updated.user.username}/${updated.slug}`);
 		}
 
 		// Cover replaced or cleared → free the old object. Compare by key (not URL)

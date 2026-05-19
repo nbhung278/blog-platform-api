@@ -78,6 +78,15 @@ const EnvSchema = z.object({
 	GOOGLE_CLIENT_ID: z.string().optional(),
 	GOOGLE_CLIENT_SECRET: z.string().optional(),
 	GOOGLE_REDIRECT_URI: z.string().url().optional(),
+
+	// IndexNow — fast URL submission for Bing / Yandex / other engines that
+	// honor the protocol. The key is a 32-char hex string we generate once and
+	// host at /<key>.txt for ownership verification. When unset, the helper
+	// no-ops so a missing key never blocks a publish.
+	INDEXNOW_KEY: z
+		.string()
+		.regex(/^[a-f0-9]{8,128}$/i, "INDEXNOW_KEY must be hex, 8-128 chars")
+		.optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

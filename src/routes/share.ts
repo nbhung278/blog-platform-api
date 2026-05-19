@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { Marked } from "marked";
 import { prisma } from "../db";
 import { env } from "../lib/env";
 import { ipRateLimit } from "../middleware/rate-limit";
@@ -104,6 +105,38 @@ function buildDescription(post: {
 	return `Read "${post.title}" by @${post.user.username} on Strix.`;
 }
 
+// Markdown → HTML for the bot-facing body. Why this exists:
+//
+// Google's "URL canonicalization" treats an empty <body> on /blog/<post> as a
+// thin/duplicate page and consolidates ranking signals onto a sibling URL with
+// real content (in our case the homepage). Result: SERP shows the post title +
+// description but the link goes to strix-blog.uk. Rendering the post markdown
+// into the body fixes the soft-404 signal so each post URL stands on its own.
+//
+// `headerIds: false` — we don't need stable anchor IDs in the bot HTML; they'd
+// just be noise. `mangle` is gone in marked v18.
+//
+// We deliberately do NOT pull in DOMPurify here:
+//   - Content originates from authenticated authors in our DB, not arbitrary
+//     user input from the network.
+//   - The bot HTML is served from a separate origin path (/share/...), not the
+//     SPA, so a stray <script> here can't access the SPA's cookies/storage.
+//   - Crawlers don't execute JS in this context anyway.
+// If we ever open up posting to untrusted users, revisit and add sanitization.
+const botMarkdown = new Marked({ gfm: true, breaks: false });
+
+function renderContentForBot(md: string): string {
+	try {
+		// `parse` is sync in marked v18 when no async extensions are registered.
+		const html = botMarkdown.parse(md) as string;
+		return html;
+	} catch {
+		// Never let a malformed post block the response — bots get an empty
+		// body in the worst case, which is no worse than today's behavior.
+		return "";
+	}
+}
+
 function renderShareHtml(opts: {
 	title: string;
 	description: string;
@@ -113,6 +146,11 @@ function renderShareHtml(opts: {
 	authorUsername: string;
 	publishedAt: Date | null;
 	updatedAt: Date | null;
+	// Raw markdown body of the post. Only rendered into <body> when
+	// skipRedirect=true (i.e. crawler path). Social-unfurl bots ignore body
+	// content, but Google reads it and uses it to decide whether this URL is
+	// "real" enough to index as a standalone page.
+	contentMd: string;
 	// When true, omit the <meta refresh> + JS redirect. Used when the worker
 	// proxies this HTML in response to a bot UA — the bot is already on the
 	// canonical URL, so a redirect loops back to itself and Facebook bails on
@@ -128,6 +166,7 @@ function renderShareHtml(opts: {
 		authorUsername,
 		publishedAt,
 		updatedAt,
+		contentMd,
 		skipRedirect,
 	} = opts;
 	const safeTitle = escapeAttr(title);
@@ -203,8 +242,28 @@ function renderShareHtml(opts: {
 		? ""
 		: `<meta http-equiv="refresh" content="0;url=${safeUrl}" />
 	<script>window.location.replace(${JSON.stringify(url)});</script>`;
+	// Bot body: full article content so Google sees a real page, not a thin
+	// shell. Heading + byline + rendered markdown. Image (if any) goes first
+	// so crawlers that snippet from "first paragraph" pick up something useful.
+	// Author byline is plain text — no link — because the share HTML is a
+	// one-shot crawler artifact, not a navigable page.
+	const safeAuthor = escapeHtml(authorName);
+	const datelineIso = publishedAt?.toISOString() ?? "";
+	const datelineLabel = publishedAt ? escapeHtml(publishedAt.toISOString().slice(0, 10)) : "";
+	const datelineHtml = datelineIso
+		? `<time datetime="${escapeAttr(datelineIso)}">${datelineLabel}</time>`
+		: "";
+	const heroImgHtml = image ? `<p><img src="${escapeAttr(image)}" alt="${safeTitle}" /></p>` : "";
+	const articleBody = skipRedirect
+		? `<article>
+		<h1>${safeTitle}</h1>
+		<p><em>By ${safeAuthor}${datelineHtml ? ` · ${datelineHtml}` : ""}</em></p>
+		${heroImgHtml}
+		${renderContentForBot(contentMd)}
+	</article>`
+		: "";
 	const redirectBody = skipRedirect
-		? ""
+		? articleBody
 		: `<p>Redirecting to <a href="${safeUrl}">${safeTitle}</a>…</p>`;
 
 	// Meta order: core OG → article → twitter → canonical → JSON-LD.
@@ -313,6 +372,7 @@ shareRoutes.get(
 			authorUsername: post.user.username,
 			publishedAt: post.publishedAt,
 			updatedAt: post.updatedAt,
+			contentMd: post.contentMd,
 			skipRedirect,
 		});
 
