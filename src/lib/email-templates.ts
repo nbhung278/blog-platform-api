@@ -58,6 +58,27 @@ const INTROS: Record<OtpPurpose, string> = {
 	forgot: "Enter the code below to set a new password.",
 };
 
+export function buildContactEmail(input: { name: string; fromEmail: string; message: string }): {
+	subject: string;
+	html: string;
+	text: string;
+} {
+	// Strip CR/LF from anything that lands in the Subject header — a stray
+	// newline in a user-supplied field could otherwise inject extra headers.
+	const safeName = input.name.replace(/[\r\n]+/g, " ").trim();
+	const safeFromEmail = input.fromEmail.replace(/[\r\n]+/g, " ").trim();
+	const subject = `[Contact] ${safeName} (${safeFromEmail})`;
+	const body = `
+<p style="margin:0 0 16px;font-size:16px;color:#1c1917;">New contact form submission</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 16px;">
+<tr><td style="padding:6px 0;font-size:13px;color:#78716c;width:80px;">From</td><td style="padding:6px 0;font-size:14px;color:#1c1917;">${escapeHtml(safeName)} &lt;${escapeHtml(safeFromEmail)}&gt;</td></tr>
+</table>
+<div style="margin:0 0 8px;padding:16px;background:#fafaf9;border:1px solid #e7e5e4;border-radius:12px;font-size:14px;color:#1c1917;line-height:1.7;white-space:pre-wrap;">${escapeHtml(input.message)}</div>
+<p style="margin:16px 0 0;font-size:12px;color:#78716c;">To reply, write to ${escapeHtml(safeFromEmail)} directly — replying to this email reaches the support inbox.</p>`;
+	const text = `New contact form submission\n\nFrom: ${safeName} <${safeFromEmail}>\n\n${input.message}\n\n--\nTo reply, write to ${safeFromEmail} directly.`;
+	return { subject, html: shell("Contact form", body), text };
+}
+
 export function buildOtpEmail(
 	purpose: OtpPurpose,
 	code: string,

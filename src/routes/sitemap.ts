@@ -30,6 +30,12 @@ function buildSitemap(
 			changefreq: "daily",
 			priority: "1.0",
 		},
+		// Evergreen marketing/legal pages. No `lastmod` — they only change when
+		// we edit the source, which is rare and not signalled to a crawler by
+		// post activity. Low priority so they don't crowd out content URLs.
+		{ loc: `${APP_URL}/about`, changefreq: "yearly", priority: "0.3" },
+		{ loc: `${APP_URL}/contact`, changefreq: "yearly", priority: "0.3" },
+		{ loc: `${APP_URL}/privacy`, changefreq: "yearly", priority: "0.3" },
 	];
 
 	const categoryUrls: Entry[] = categories.map((c) => ({

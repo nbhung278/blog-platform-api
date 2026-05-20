@@ -22,6 +22,7 @@ import { shareRoutes } from "./routes/share";
 import { sitemapRoutes } from "./routes/sitemap";
 import { feedRoutes } from "./routes/feed";
 import { webhooksRoutes } from "./routes/webhooks";
+import { contactRoutes } from "./routes/contact";
 import { startViewCountFlusher, stopViewCountFlusher, flushViewCounts } from "./lib/view-counter";
 import { startCronJobs, stopCronJobs } from "./lib/cron";
 import { authenticateUpgradeRequest, wsHandlers, type WSData } from "./lib/ws";
@@ -99,6 +100,7 @@ app.route("/api/bookmarks", bookmarksRoutes);
 app.route("/api/comments", commentsRoutes);
 app.route("/api/conversations", conversationsRoutes);
 app.route("/api/reading-progress", readingProgressRoutes);
+app.route("/api/contact", contactRoutes);
 // Public OG-tag / unfurl route. Lives outside /api/* so the share URLs are
 // short and obviously not a JSON endpoint.
 app.route("/share", shareRoutes);
