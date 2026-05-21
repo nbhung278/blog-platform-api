@@ -1,134 +1,92 @@
 # Strix — Backend
 
-API server for the Strix blog platform. Powers the public client and the admin panel.
+API server cho Strix blog platform. Powers public client + admin panel.
 
-## Stack
+**Stack**: Bun + Hono + Prisma 7 + Postgres + Redis + S3-compatible storage + Nginx + WebSocket.
 
-- **Bun** runtime + **Hono** HTTP framework
-- **PostgreSQL** + **Prisma 7** ORM
-- **Redis** — token version cache, view-counter buffer, rate-limit counters
-- **S3-compatible storage** (MinIO local, AWS S3 prod) for image uploads with **sharp** for resize/WebP
-- **Nginx** (Docker) reverse proxy with gzip — fronts Bun in production
-- WebSocket server (Bun native) for realtime notifications and direct messages
+> Đọc [../CLAUDE.md](../CLAUDE.md) ở root project để nắm overview kiến trúc, cookie protocol, deploy workflow.
 
-## Features
-
-- JWT auth with refresh-token rotation, HttpOnly cookies, CSRF double-submit
-- Per-app cookie partitioning (web vs admin) — log into both apps simultaneously
-- RBAC: roles → permissions → users
-- Rate limiting (login throttle, IP-based per-route limits)
-- Posts: draft → pending → published → rejected workflow with version-based optimistic locking
-- Categories, tags, search (title / content / tag / author)
-- Image upload pipeline: validate magic bytes → sharp resize (max 1200px, EXIF rotate) → WebP convert → S3 upload
-- View counter (Redis buffer flushed every 30s to avoid write-amplification)
-- Follow / unfollow with email-notification toggle
-- Notifications fanned out over WebSocket
-- Direct messaging (1:1 conversations) with reactions + edit + delete
-- CDN cache: 5 public endpoints cached at Cloudflare edge (see `ROADMAP.md`)
-
-## Prerequisites
-
-- [Bun](https://bun.sh/) ≥ 1.2
-- Docker (for local Postgres / Redis / MinIO via `docker-compose`)
-
-## Setup
+## Quick start
 
 ```bash
-# Install deps
+# Prerequisites: Bun ≥ 1.2, Docker
+
+# Boot local infra (Postgres + Redis + Minio)
+docker compose up -d
+
+# Setup
 bun install
-
-# Copy env and fill in secrets
-cp .env.example .env
-# Edit .env — at minimum set JWT_SECRET (32+ chars)
-
-# Boot local infra (Postgres + Redis + MinIO)
-docker-compose up -d
-
-# Run migrations + seed roles/permissions
+cp .env.example .env  # fill JWT_SECRET (32+ chars), S3 keys (minioadmin local)
 bun run db:migrate
 bun run db:seed
 
-# Start dev server (auto-reloads on file change)
-bun run dev
+# Dev (auto-reload)
+bun run dev  # :3000
 ```
 
-Server listens on `http://localhost:3000` by default.
+## Scripts
 
-## Common scripts
-
-| Command | What it does |
-|---|---|
-| `bun run dev` | Start with watch mode |
-| `bun run start` | Production start |
+| Command | What |
+| --- | --- |
+| `bun run dev` | Watch mode |
+| `bun run check` | tsc + eslint + prettier check |
+| `bun run lint:fix` | Auto-fix lint |
 | `bun run db:migrate` | Apply Prisma migrations |
-| `bun run db:seed` | Seed default roles + permissions |
+| `bun run db:seed` | Seed roles + permissions |
 | `bun run db:studio` | Open Prisma Studio |
-| `bun run check` | Type-check + lint + format check |
-| `bun run lint:fix` | Auto-fix lint issues |
-| `bun run format` | Run Prettier |
-
-## Architecture notes
-
-- **Auth flow**: `/auth/login` issues access (15m) + refresh (30d) + CSRF cookies. The CSRF cookie is JS-readable; clients echo it back via `X-CSRF-Token` for double-submit verification on state-changing requests.
-- **Token revocation**: every user has a `tokenVersion`. Bumping it (logout-all, password change) invalidates every issued JWT immediately, even un-expired ones.
-- **WebSocket**: `/ws` upgrades verify the access cookie + check `tokenVersion`, enforce origin allowlist, and cap connections per user. Logout / password change actively disconnect open sockets via `disconnectUser()`.
-- **CSP**: backend only emits JSON, but a strict CSP is set as defense-in-depth.
-- **Cache headers**: public read endpoints emit `Cache-Control: public, s-maxage=...` so Cloudflare can cache at the edge. See `ROADMAP.md` for the cache rule + endpoint TTLs.
 
 ## Project layout
 
 ```
 src/
-  index.ts              # entry: Hono app + Bun.serve + WebSocket handler
-  db/                   # Prisma client
+  index.ts              # Hono app + Bun.serve + WebSocket handler
+  db/index.ts           # Prisma client
   middleware/
-    auth.ts             # authMiddleware + RBAC helpers + CSRF check
-    rate-limit.ts       # IP/login rate limiters (Redis-backed)
+    auth.ts             # authMiddleware + RBAC + CSRF check
+    rate-limit.ts       # IP/login limiters (Redis-backed)
+    idempotency.ts      # Idempotency-Key support
   lib/
-    cookies.ts          # cookie helpers, app-kind partitioning
-    tokens.ts           # JWT issue/rotate/revoke
-    notifications.ts    # createNotification + fanoutNotification
-    realtime.ts         # in-memory subscriber map + publishToUser
-    ws.ts               # WebSocket auth + handlers
-    permissions.ts      # PermissionKey constants
-    s3.ts               # S3 upload helpers
-    view-counter.ts     # Redis buffer + periodic flush to Postgres
+    cookies.ts          # ⚠ KEEP IN SYNC với 2 SPA's authConstants.ts
+    tokens.ts           # JWT issue/rotate/revoke + tokenVersion
+    permissions.ts      # 17 PermissionKey constants
+    request-context.ts  # extract (ip, userAgent)
+    prisma-errors.ts    # isUniqueViolation helper
+    ssrf-guard.ts       # DNS resolve + IP block + pinned IP
+    s3.ts otp.ts ws.ts realtime.ts view-counter.ts cron.ts
   routes/
-    auth.ts             # login/register/logout/me/change-password
-    posts.ts            # CRUD + feed + search
-    follows.ts          # follow/unfollow/email-toggle
-    notifications.ts    # list/mark-read/unread-count
-    conversations.ts    # direct messages 1:1
+    auth.ts             # login/register/logout/me/refresh/google
+    posts.ts            # CRUD + feed + search + by-categories
+    follows.ts notifications.ts conversations.ts
     bookmarks.ts claps.ts comments.ts
-    categories.ts roles.ts users.ts uploads.ts analytics.ts share.ts
+    categories.ts roles.ts users.ts uploads.ts analytics.ts
+    share.ts            # /share/* — OG tags cho social crawler
+    sitemap.ts feed.ts webhooks.ts contact.ts
 prisma/
-  schema.prisma         # source of truth for the DB
-  migrations/           # generated migration history
-  seed.ts               # roles + permissions seed
-nginx/                  # prod reverse proxy config (mounted into nginx container)
+  schema.prisma         # DB source of truth
+  migrations/
+  seed.ts
+nginx/                  # prod reverse proxy config (mount vào nginx container)
+scripts/
+  setup-ec2.sh          # Lightsail bootstrap (1 lần)
+  backup-db.sh          # daily backup → S3 (chạy qua systemd timer)
 ```
 
-## Environment variables
+## Production deploy
 
-See `.env.example`. Notable:
+Xem [../scripts/DEPLOY.md](../scripts/DEPLOY.md) cho kiến trúc + setup lần đầu.
 
-- `JWT_SECRET` — must be 32+ random bytes in production
-- `APP_URL` / `ADMIN_URL` — added to CORS allowlist and WebSocket origin allowlist; must match exactly (including protocol)
-- `ALLOW_REGISTRATION` — flip to `false` to lock down public sign-up
-- `S3_*` — bucket, region, access key, secret, public URL (or CDN)
+```bash
+./scripts/deploy-backend.sh             # rsync + rebuild + smoke test
+./scripts/deploy-backend.sh --migrate   # kèm prisma migrate deploy
+```
 
-## Deploying
+**Critical env trên prod**: `NODE_ENV=production`, `TRUST_PROXY=true`, `SETUP_TOKEN` (32+ hex chars). Backend Zod refine sẽ fail boot nếu thiếu `SETUP_TOKEN` trong prod.
 
-In production:
-
-- Set `NODE_ENV=production` (cookies become `Secure`)
-- Stack uses **Nginx container** as reverse proxy (gzip enabled, Cloudflare Origin Cert) — see `../scripts/DEPLOY.md`
-- Cloudflare proxy ON for all subdomains; cache rule in place for public read endpoints
-- Use managed Redis (or a single shared instance — token cache, rate limit, view-counter all live there)
-- For S3, swap MinIO endpoint/keys to AWS or any S3-compatible provider
-- Run `prisma migrate deploy` — never `migrate dev` against prod
-- `./scripts/deploy-backend.sh` handles rsync + rebuild + smoke test
+Khi thêm env mới: phải sync **3 chỗ**:
+1. `.env.production.example` (template)
+2. `src/lib/env.ts` (Zod schema — dùng `optionalEnvString` helper cho optional, không bare `.optional()`)
+3. `docker-compose.prod.yml` `environment:` block (container chỉ thấy env được whitelist ở đây)
 
 ## Roadmap
 
-See `ROADMAP.md` for performance/UX improvements (compression, skeleton loaders, CDN cache, etc.) — most done as of 2026-05-08.
+[ROADMAP.md](ROADMAP.md) — performance/UX improvements (đa số đã ship as of 2026-05-08).

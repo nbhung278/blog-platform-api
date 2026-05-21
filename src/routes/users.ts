@@ -7,6 +7,7 @@ import { prisma } from "../db";
 import { authMiddleware, requireViewOrManage, type JWTPayload } from "../middleware/auth";
 import { PERMISSIONS, ROLE_KEYS } from "../lib/permissions";
 import { bumpTokenVersion } from "../lib/tokens";
+import { isUniqueViolation } from "../lib/prisma-errors";
 import { passwordSchema } from "./auth";
 
 export const usersRoutes = new Hono<{ Variables: { user: JWTPayload } }>();
@@ -102,14 +103,30 @@ usersRoutes.patch("/:id", zValidator("json", updateUserSchema), async (c) => {
 	const id = c.req.param("id");
 	const body = c.req.valid("json");
 
-	const existing = await prisma.user.findUnique({ where: { id } });
+	const existing = await prisma.user.findUnique({
+		where: { id },
+		include: { roles: { select: { role: { select: { key: true } } } } },
+	});
 	if (!existing) return c.json({ error: "User not found" }, 404);
+
+	const callerIsSuperAdmin = me.roles.includes(ROLE_KEYS.SUPER_ADMIN);
+	const targetIsSuperAdmin = existing.roles.some((ur) => ur.role.key === ROLE_KEYS.SUPER_ADMIN);
+
+	// Non-super_admin callers must never touch a super_admin account. Without this
+	// guard a USER_MANAGE holder could PATCH the password (or email — which lets
+	// them drive /forgot-password themselves) and take over the super_admin.
+	// The roleIds check below handles the orthogonal case of escalating a
+	// non-super_admin target into super_admin.
+	if (targetIsSuperAdmin && !callerIsSuperAdmin) {
+		return c.json({ error: "Only a super_admin can modify a super_admin account" }, 403);
+	}
 
 	// Hardening against privilege escalation by users with USER_MANAGE who
 	// aren't super_admin themselves:
 	//  - they can't edit their own roles (so they can't escalate themselves)
-	//  - they can't grant or strip the super_admin role to anyone
-	const callerIsSuperAdmin = me.roles.includes(ROLE_KEYS.SUPER_ADMIN);
+	//  - they can't grant the super_admin role to anyone
+	// (Stripping super_admin from an existing super_admin is already blocked
+	// by the targetIsSuperAdmin guard above.)
 	if (body.roleIds && !callerIsSuperAdmin) {
 		if (id === me.sub) {
 			return c.json({ error: "You cannot change your own roles" }, 403);
@@ -119,15 +136,8 @@ usersRoutes.patch("/:id", zValidator("json", updateUserSchema), async (c) => {
 			select: { key: true },
 		});
 		const wouldGrantSuperAdmin = requestedRoles.some((r) => r.key === ROLE_KEYS.SUPER_ADMIN);
-		const targetCurrentRoles = await prisma.userRole.findMany({
-			where: { userId: id },
-			select: { role: { select: { key: true } } },
-		});
-		const targetIsSuperAdmin = targetCurrentRoles.some(
-			(ur) => ur.role.key === ROLE_KEYS.SUPER_ADMIN,
-		);
-		if (wouldGrantSuperAdmin || targetIsSuperAdmin) {
-			return c.json({ error: "Only a super_admin can assign or modify the super_admin role" }, 403);
+		if (wouldGrantSuperAdmin) {
+			return c.json({ error: "Only a super_admin can assign the super_admin role" }, 403);
 		}
 	}
 
@@ -160,12 +170,7 @@ usersRoutes.patch("/:id", zValidator("json", updateUserSchema), async (c) => {
 	} catch (err) {
 		// Translate the unique-constraint violation into a clean 409 instead of
 		// bubbling up as a 500.
-		if (
-			err &&
-			typeof err === "object" &&
-			"code" in err &&
-			(err as { code?: string }).code === "P2002"
-		) {
+		if (isUniqueViolation(err)) {
 			return c.json({ error: "Email or username already taken" }, 409);
 		}
 		throw err;
@@ -186,6 +191,21 @@ usersRoutes.delete("/:id", async (c) => {
 
 	if (me.sub === id) {
 		return c.json({ error: "Cannot delete your own account" }, 400);
+	}
+
+	// Non-super_admin callers can't delete a super_admin. Without this guard a
+	// USER_MANAGE holder could wipe the only super_admin account and leave the
+	// platform without a privileged operator.
+	const callerIsSuperAdmin = me.roles.includes(ROLE_KEYS.SUPER_ADMIN);
+	if (!callerIsSuperAdmin) {
+		const targetRoles = await prisma.userRole.findMany({
+			where: { userId: id },
+			select: { role: { select: { key: true } } },
+		});
+		const targetIsSuperAdmin = targetRoles.some((ur) => ur.role.key === ROLE_KEYS.SUPER_ADMIN);
+		if (targetIsSuperAdmin) {
+			return c.json({ error: "Only a super_admin can delete a super_admin account" }, 403);
+		}
 	}
 
 	try {

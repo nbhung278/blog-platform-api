@@ -79,6 +79,26 @@ const MAX_WIDTH = 1200;
 const WEBP_QUALITY = 80;
 const FETCH_TIMEOUT_MS = 10_000;
 
+// Thrown by processAndUpload when an uploaded image declared as GIF doesn't
+// actually start with the GIF magic bytes. Caller maps this to a 400 (bad
+// input) rather than the generic 500 reserved for storage/encode failures.
+class InvalidImageSignatureError extends Error {}
+
+// GIF magic bytes: ASCII "GIF87a" or "GIF89a" at offset 0. Anything else
+// claiming to be image/gif is either malformed or a polyglot — a file that
+// parses as both GIF and (say) HTML/JS depending on the reader. Pass-through
+// without this check would let an attacker upload a payload with image/gif
+// MIME, then point a victim's <img>/<object>/<embed> at the URL and have
+// non-image consumers parse the body as something else.
+function isGifBytes(buf: Buffer): boolean {
+	if (buf.length < 6) return false;
+	// G=0x47 I=0x49 F=0x46 8=0x38 7|9=0x37|0x39 a=0x61
+	if (buf[0] !== 0x47 || buf[1] !== 0x49 || buf[2] !== 0x46 || buf[3] !== 0x38) return false;
+	if (buf[4] !== 0x37 && buf[4] !== 0x39) return false;
+	if (buf[5] !== 0x61) return false;
+	return true;
+}
+
 async function processAndUpload(
 	inputBuffer: Buffer,
 	contentType: string,
@@ -90,6 +110,13 @@ async function processAndUpload(
 	let outputContentType: string;
 	let outputExt: string;
 	if (contentType === "image/gif") {
+		// Verify the bytes actually start with the GIF signature before we
+		// rehost them with `Content-Type: image/gif`. A polyglot file with a
+		// .gif MIME but non-GIF body would otherwise sail through and S3 would
+		// serve it back with the same Content-Type for someone else to load.
+		if (!isGifBytes(inputBuffer)) {
+			throw new InvalidImageSignatureError("GIF signature mismatch");
+		}
 		outputBuffer = inputBuffer;
 		outputContentType = "image/gif";
 		outputExt = "gif";
@@ -142,6 +169,9 @@ uploadsRoutes.post(
 			const result = await processAndUpload(inputBuffer, file.type, user.sub);
 			return c.json(result, 201);
 		} catch (err) {
+			if (err instanceof InvalidImageSignatureError) {
+				return c.json({ error: "File content does not match its declared image type" }, 400);
+			}
 			logger.error({ err }, "[uploads] image upload failed");
 			return c.json({ error: "Upload failed" }, 500);
 		}
@@ -268,6 +298,9 @@ uploadsRoutes.post(
 			const result = await processAndUpload(inputBuffer, contentType, user.sub);
 			return c.json(result, 201);
 		} catch (err) {
+			if (err instanceof InvalidImageSignatureError) {
+				return c.json({ error: "Source content does not match its declared image type" }, 400);
+			}
 			logger.error({ err }, "[uploads] rehost process/upload failed");
 			return c.json({ error: "Upload failed" }, 500);
 		}

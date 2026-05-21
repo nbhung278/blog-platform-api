@@ -73,7 +73,11 @@ const updatePostSchema = z.object({
 		.optional(),
 });
 
-function slugify(title: string): string {
+// Post slugs append a base36 timestamp suffix to keep them unique per author
+// without an extra DB round-trip — two posts published in the same second by
+// the same author would otherwise collide on the (userId, slug) unique index.
+// Category slugs don't need this and use a plain slugify in categories.ts.
+function slugifyPostTitle(title: string): string {
 	return (
 		title
 			.toLowerCase()
@@ -696,7 +700,7 @@ postsRoutes.post(
 			return c.json({ error: guard.reason }, 403);
 		}
 
-		const slug = slugify(body.title);
+		const slug = slugifyPostTitle(body.title);
 		const readingTime = calcReadingTime(body.contentMd);
 		const publishedAt = body.status === "published" ? new Date() : null;
 

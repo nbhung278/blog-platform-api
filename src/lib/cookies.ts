@@ -8,6 +8,18 @@ import { randomBytes, timingSafeEqual } from "crypto";
 // (e.g. testing as an author in the client while moderating as an admin),
 // we partition the cookie names by app kind. The kind is signaled by the
 // X-App-Client request header set by each SPA.
+//
+// ╔════════════════════════════════════════════════════════════════════╗
+// ║ KEEP IN SYNC — these names appear in THREE places:                  ║
+// ║   1. THIS FILE (backend authoritative source)                       ║
+// ║   2. blog-platform-frontend/src/lib/authConstants.ts (web partition)║
+// ║   3. blog-platform-admin/src/lib/authConstants.ts    (admin)        ║
+// ║ Plus the parser in blog-platform-backend/src/lib/ws.ts which reads  ║
+// ║ `admin_at` / `web_at` directly off the WS upgrade Cookie header.    ║
+// ║ Changing a cookie name without updating the matching SPA constant   ║
+// ║ silently breaks login for that SPA — the request still has cookies  ║
+// ║ but the backend reads them under the wrong key.                     ║
+// ╚════════════════════════════════════════════════════════════════════╝
 export type AppKind = "admin" | "web";
 
 const APP_HEADER = "x-app-client";

@@ -1,12 +1,12 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, type JWTPayload } from "../middleware/auth";
 import { ipRateLimit } from "../middleware/rate-limit";
 import { createNotification } from "../lib/notifications";
 import { setPrivateNoStore } from "../lib/cache-headers";
+import { isUniqueViolation } from "../lib/prisma-errors";
 
 // Cap follow/unfollow churn at 60/min/IP — generous for a real user, low
 // enough to dampen scripted graph spam.
@@ -97,7 +97,7 @@ followsRoutes.post("/:username", followMutationLimit, authMiddleware, async (c) 
 		});
 		return c.json({ following: true, emailEnabled: follow.emailEnabled }, 201);
 	} catch (err) {
-		if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+		if (isUniqueViolation(err)) {
 			const winner = await prisma.follow.findUnique({
 				where: { followerId_followingId: { followerId: me.sub, followingId: target.id } },
 				select: { emailEnabled: true },

@@ -1,17 +1,21 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { Prisma } from "@prisma/client";
 import { prisma } from "../db";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { ipRateLimit } from "../middleware/rate-limit";
+import { isUniqueViolation } from "../lib/prisma-errors";
 
 const readLimit = ipRateLimit({ keyPrefix: "categories-read", limit: 60, windowSeconds: 60 });
 
 export const categoriesRoutes = new Hono();
 
-function slugify(name: string): string {
+// Category slugs are stable — `Tech News` always becomes `tech-news`, no
+// timestamp suffix. The DB enforces uniqueness on (name) and (slug) so a
+// rename collision surfaces as P2002 in the create/update handler.
+// Post slugs use slugifyPostTitle in posts.ts which adds a timestamp.
+function slugifyCategoryName(name: string): string {
 	return name
 		.toLowerCase()
 		.replace(/[^a-z0-9\s-]/g, "")
@@ -36,7 +40,7 @@ categoriesRoutes.get("/", readLimit, async (c) => {
 });
 
 // Public: get single category by id
-categoriesRoutes.get("/:id", async (c) => {
+categoriesRoutes.get("/:id", readLimit, async (c) => {
 	const category = await prisma.category.findUnique({
 		where: { id: c.req.param("id") },
 	});
@@ -52,7 +56,7 @@ categoriesRoutes.post(
 	zValidator("json", categorySchema),
 	async (c) => {
 		const { name, description } = c.req.valid("json");
-		const slug = slugify(name);
+		const slug = slugifyCategoryName(name);
 
 		// Use the unique constraint as the source of truth: two concurrent
 		// admins racing to create the same category would both pass a pre-check
@@ -64,7 +68,7 @@ categoriesRoutes.post(
 			});
 			return c.json(category, 201);
 		} catch (err) {
-			if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+			if (isUniqueViolation(err)) {
 				return c.json({ error: "Category name already exists" }, 409);
 			}
 			throw err;
@@ -88,7 +92,7 @@ categoriesRoutes.patch(
 		const data: { name?: string; slug?: string; description?: string } = {};
 		if (body.name) {
 			data.name = body.name;
-			data.slug = slugify(body.name);
+			data.slug = slugifyCategoryName(body.name);
 		}
 		if (body.description !== undefined) data.description = body.description;
 
@@ -96,7 +100,7 @@ categoriesRoutes.patch(
 			const updated = await prisma.category.update({ where: { id }, data });
 			return c.json(updated);
 		} catch (err) {
-			if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+			if (isUniqueViolation(err)) {
 				return c.json({ error: "Category name already exists" }, 409);
 			}
 			throw err;

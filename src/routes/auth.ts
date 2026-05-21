@@ -3,7 +3,6 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { hash, compare } from "bcrypt";
 import { randomBytes } from "node:crypto";
-import type { Context } from "hono";
 import { prisma } from "../db";
 import { authMiddleware, tryGetUser, type JWTPayload } from "../middleware/auth";
 import { disconnectUser } from "../lib/realtime";
@@ -12,7 +11,6 @@ import {
 	ipRateLimit,
 	recordLoginFailure,
 	recordLoginSuccess,
-	getClientIp,
 } from "../middleware/rate-limit";
 import {
 	ADMIN_PANEL_PERMISSIONS,
@@ -42,6 +40,8 @@ import {
 	setAuthCookies,
 } from "../lib/cookies";
 import { isAllowedMediaUrl } from "../lib/url-allowlist";
+import { isUniqueViolation } from "../lib/prisma-errors";
+import { clientContext } from "../lib/request-context";
 import { sendEmail } from "../lib/email";
 import { buildOtpEmail } from "../lib/email-templates";
 import { canResend, invalidateOtpsForEmail, issueOtp, verifyOtp } from "../lib/otp";
@@ -100,24 +100,25 @@ const changePasswordSchema = z.object({
 
 class SetupAlreadyCompletedError extends Error {}
 
-function clientContext(c: Context) {
-	const rawIp = getClientIp(c);
-	const ip = rawIp === "unknown" ? null : rawIp;
-	const userAgent = c.req.header("user-agent") || null;
-	return { ip, userAgent };
-}
-
 // Pre-computed bcrypt hash of a random string. Used to make /login spend the
 // same wall-time on a missing-user path as on a wrong-password path. Without
 // this, `bcrypt.compare` only runs when the user exists, leaking ~30ms of
 // timing signal that lets attackers enumerate accounts.
 const DUMMY_PASSWORD_HASH = "$2b$10$CwTycUXWue0Thq9StjUM0uJ8cLh5GxqCkB5rIo1NYHSZv1VfM0vBu";
 
-// Public: check if setup wizard should be shown (no users yet)
-authRoutes.get("/setup-status", async (c) => {
-	const userCount = await prisma.user.count();
-	return c.json({ needsSetup: userCount === 0 });
-});
+// Public: check if setup wizard should be shown (no users yet).
+// Rate-limited because a malicious caller could otherwise poll this cheaply
+// to detect a DB reset and race /setup. The actual /setup endpoint has its
+// own protections (Serializable + optional SETUP_TOKEN), but limiting the
+// status probe keeps recon noisy.
+authRoutes.get(
+	"/setup-status",
+	ipRateLimit({ keyPrefix: "setup-status", limit: 10, windowSeconds: 60 * 60 }),
+	async (c) => {
+		const userCount = await prisma.user.count();
+		return c.json({ needsSetup: userCount === 0 });
+	},
+);
 
 // Public: bootstrap first super_admin. Only works when DB has zero users AND
 // (if SETUP_TOKEN is configured) the caller echoes the install token so
@@ -240,12 +241,7 @@ authRoutes.post(
 				},
 			});
 		} catch (err) {
-			if (
-				err &&
-				typeof err === "object" &&
-				"code" in err &&
-				(err as { code?: string }).code === "P2002"
-			) {
+			if (isUniqueViolation(err)) {
 				return c.json({ error: "Email or username already taken" }, 400);
 			}
 			throw err;
@@ -777,6 +773,21 @@ authRoutes.post(
 	ipRateLimit({ keyPrefix: "logout", limit: 30, windowSeconds: 60 * 15 }),
 	async (c) => {
 		const refreshToken = getRefreshCookie(c);
+
+		// CSRF protection: in prod cookies are SameSite=None (cross-subdomain SPA),
+		// so a cross-site POST would otherwise carry the auth cookies and force-
+		// logout the user as a drive-by DoS. Enforce double-submit only when an
+		// active session cookie is present; an attacker with no refresh cookie
+		// has nothing to revoke, so the request is already a no-op there and we
+		// keep the no-session path idempotent (200) for clean client cleanup.
+		if (refreshToken) {
+			const csrfHeader = c.req.header(CSRF_HEADER);
+			const csrfCookie = getCsrfCookie(c);
+			if (!csrfTokensMatch(csrfHeader, csrfCookie)) {
+				return c.json({ error: "CSRF token mismatch" }, 403);
+			}
+		}
+
 		const me = await tryGetUser(c);
 		if (refreshToken) {
 			await revokeRefreshToken(refreshToken);
@@ -948,10 +959,11 @@ function randomSuffix(): string {
 	return randomBytes(3).toString("hex");
 }
 
-// Start the OAuth dance. Issues a signed `state` cookie and redirects the
-// browser to Google's consent screen. The state cookie is HttpOnly + SameSite
-// Lax (Lax because Google's redirect back is a top-level navigation, which
-// `Strict` would strip the cookie from).
+// Start the OAuth dance. Issues an HMAC-signed `state` token (no cookie —
+// the token is self-contained and re-verified in the callback via the same
+// JWT_SECRET) and redirects the browser to Google's consent screen. The
+// signature binds the nonce + a timestamp so the callback can detect both
+// tampering and stale states (≥10 min old).
 authRoutes.get(
 	"/google",
 	ipRateLimit({ keyPrefix: "google_start", limit: 20, windowSeconds: 60 * 15 }),
@@ -1072,10 +1084,7 @@ authRoutes.get(
 					});
 					break;
 				} catch (err) {
-					// Renamed from `code` to avoid shadowing the OAuth `code` query
-					// param captured in the outer scope.
-					const prismaErrorCode = (err as { code?: string }).code;
-					if (prismaErrorCode === "P2002") {
+					if (isUniqueViolation(err)) {
 						// Could be email OR username — re-fetch by email in case of
 						// race, otherwise extend the username and try again.
 						const existing = await prisma.user.findUnique({ where: { email } });

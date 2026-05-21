@@ -10,20 +10,25 @@ type Options = {
 };
 
 export function getClientIp(c: Context): string {
-	// When TRUST_PROXY=true the server sits behind a trusted reverse proxy
-	// (Cloudflare, nginx, etc.) that strips and re-sets forwarded headers.
-	// Priority: CF-Connecting-IP (set exclusively by Cloudflare, most reliable)
-	// → X-Real-IP (set by nginx) → X-Forwarded-For → socket IP fallback.
-	// When false, always use the actual TCP socket IP injected at the Bun.serve
-	// level (see index.ts), which clients cannot spoof.
+	// Production chain is User → Cloudflare → nginx → backend. Only
+	// CF-Connecting-IP is safe to trust:
+	//   - CF overwrites any client-supplied CF-Connecting-IP at the edge
+	//   - X-Forwarded-For is appended by nginx ($proxy_add_x_forwarded_for) on
+	//     top of whatever the client sent, so its head can be attacker-spoofed
+	//   - X-Real-IP set by nginx equals $remote_addr, which from nginx's view
+	//     is the Cloudflare edge IP, not the real user. Useless for rate limit.
+	//
+	// When TRUST_PROXY=false (no CF in front, e.g. local dev), fall back to the
+	// TCP socket IP injected at the Bun.serve level (see index.ts), which
+	// clients cannot spoof.
+	//
+	// We deliberately do NOT fall back from CF-Connecting-IP to other headers
+	// when TRUST_PROXY=true. If CF is misconfigured and the header is missing,
+	// returning "unknown" collapses every such request into a single bucket —
+	// noisy but safe. Falling back to a spoofable header would silently let an
+	// attacker bypass every IP-keyed limit (login backoff, OTP throttle, etc.).
 	if (process.env.TRUST_PROXY === "true") {
-		return (
-			c.req.header("cf-connecting-ip") ||
-			c.req.header("x-real-ip") ||
-			c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-			c.req.header("x-real-socket-ip") ||
-			"unknown"
-		);
+		return c.req.header("cf-connecting-ip") || "unknown";
 	}
 	return c.req.header("x-real-socket-ip") || "unknown";
 }

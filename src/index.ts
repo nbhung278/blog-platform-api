@@ -119,6 +119,26 @@ app.get("/", (c) => c.json({ status: "ok" }));
 // Hono's default which can leak the message + stack into the response. Log
 // the full error server-side, but only return a generic 500 to the client.
 app.onError((err, c) => {
+	// Prisma codes we translate to 4xx so they don't pollute the error log
+	// or show up as 500 in dashboards:
+	//   P2007 — invalid input value (e.g. a route param like /posts/id/abc
+	//           that isn't a UUID; Prisma 7 surfaces this where 6 used P2023)
+	//   P2023 — inconsistent column data (kept for safety on older clients)
+	//   P2025 — record not found on delete/update
+	// Probe top-level `code`, `cause.code`, and the message text in turn so
+	// a wrapped error from a middleware chain still gets classified correctly.
+	const errAny = err as { code?: string; cause?: { code?: string }; message?: string };
+	const code = errAny.code ?? errAny.cause?.code;
+	const msg = errAny.message ?? "";
+	const isBadInput =
+		code === "P2007" || code === "P2023" || msg.includes("P2007") || msg.includes("P2023");
+	const isNotFound = code === "P2025" || msg.includes("P2025");
+	if (isBadInput) {
+		return c.json({ error: "Invalid identifier format" }, 400);
+	}
+	if (isNotFound) {
+		return c.json({ error: "Not found" }, 404);
+	}
 	logger.error(
 		{ err, path: c.req.path, method: c.req.method },
 		"[server] unhandled error in route",

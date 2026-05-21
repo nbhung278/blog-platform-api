@@ -113,6 +113,12 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+      # SETUP_TOKEN: Zod env schema requires this in production (see
+      # src/lib/env.ts refine). Missing → container crash-loops on boot.
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      # INDEXNOW_KEY: optional, no-ops when unset. Pass through so a configured
+      # key on the host actually reaches the backend process.
+      INDEXNOW_KEY: ${INDEXNOW_KEY:-}
 
   nginx:
     image: nginx:alpine
