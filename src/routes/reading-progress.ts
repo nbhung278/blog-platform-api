@@ -135,6 +135,7 @@ readingProgressRoutes.get(
 						slug: true,
 						excerpt: true,
 						coverUrl: true,
+						thumbnailUrl: true,
 						readingTime: true,
 						user: { select: { name: true, username: true, avatarUrl: true } },
 					},

@@ -27,6 +27,7 @@ bookmarksRoutes.get("/", authMiddleware, async (c) => {
 					slug: true,
 					excerpt: true,
 					coverUrl: true,
+					thumbnailUrl: true,
 					publishedAt: true,
 					readingTime: true,
 					tags: true,

@@ -171,8 +171,9 @@ model Post {
   contentMd   String    @map("content_md")
   contentHtml String    @map("content_html")
   excerpt     String?
-  coverUrl    String?   @map("cover_url")
-  ogImageUrl  String?   @map("og_image_url")
+  coverUrl      String?   @map("cover_url")
+  thumbnailUrl  String?   @map("thumbnail_url")
+  ogImageUrl    String?   @map("og_image_url")
   status      String    @default("draft")
   publishedAt DateTime? @map("published_at")
   readingTime Int       @default(0) @map("reading_time")

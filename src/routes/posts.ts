@@ -40,6 +40,12 @@ const createPostSchema = z.object({
 		.refine((u) => isAllowedMediaUrl(u), "coverUrl host not allowed")
 		.nullable()
 		.optional(),
+	thumbnailUrl: z
+		.string()
+		.url()
+		.refine((u) => isAllowedMediaUrl(u), "thumbnailUrl host not allowed")
+		.nullable()
+		.optional(),
 	status: z.enum(POST_STATUSES).default("draft"),
 	tags: z.array(z.string().max(50)).max(20).default([]),
 	metaTitle: z.string().max(200).optional(),
@@ -59,6 +65,12 @@ const updatePostSchema = z.object({
 		.string()
 		.url()
 		.refine((u) => isAllowedMediaUrl(u), "coverUrl host not allowed")
+		.nullable()
+		.optional(),
+	thumbnailUrl: z
+		.string()
+		.url()
+		.refine((u) => isAllowedMediaUrl(u), "thumbnailUrl host not allowed")
 		.nullable()
 		.optional(),
 	status: z.enum(POST_STATUSES).optional(),
@@ -244,6 +256,7 @@ const POST_LIST_SELECT = {
 	slug: true,
 	excerpt: true,
 	coverUrl: true,
+	thumbnailUrl: true,
 	status: true,
 	publishedAt: true,
 	readingTime: true,
@@ -713,6 +726,7 @@ postsRoutes.post(
 				contentHtml: body.contentHtml,
 				excerpt: body.excerpt,
 				coverUrl: body.coverUrl,
+				thumbnailUrl: body.thumbnailUrl,
 				status: body.status,
 				publishedAt,
 				readingTime,

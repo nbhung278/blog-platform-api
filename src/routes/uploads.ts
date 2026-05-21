@@ -99,11 +99,19 @@ function isGifBytes(buf: Buffer): boolean {
 	return true;
 }
 
+const THUMB_WIDTH = 400;
+
 async function processAndUpload(
 	inputBuffer: Buffer,
 	contentType: string,
 	userSub: string,
-): Promise<{ url: string; key: string; size: number; contentType: string }> {
+): Promise<{
+	url: string;
+	thumbnailUrl: string | null;
+	key: string;
+	size: number;
+	contentType: string;
+}> {
 	// GIF can be animated; sharp would flatten it to a still frame, so pass
 	// through untouched. Everything else gets resized + re-encoded as WebP.
 	let outputBuffer: Buffer;
@@ -130,9 +138,28 @@ async function processAndUpload(
 		outputExt = "webp";
 	}
 
-	const key = `posts/${userSub}/${crypto.randomUUID()}.${outputExt}`;
+	const uuid = crypto.randomUUID();
+	const key = `posts/${userSub}/${uuid}.${outputExt}`;
 	const url = await uploadImage({ key, body: outputBuffer, contentType: outputContentType });
-	return { url, key, size: outputBuffer.byteLength, contentType: outputContentType };
+
+	// Generate a 400px thumbnail for non-GIF images so card components can
+	// load a smaller file instead of the full 1200px cover.
+	let thumbnailUrl: string | null = null;
+	if (contentType !== "image/gif") {
+		const thumbBuffer = await sharp(inputBuffer, { failOn: "none" })
+			.rotate()
+			.resize({ width: THUMB_WIDTH, withoutEnlargement: true })
+			.webp({ quality: WEBP_QUALITY })
+			.toBuffer();
+		const thumbKey = `posts/${userSub}/${uuid}-thumb.webp`;
+		thumbnailUrl = await uploadImage({
+			key: thumbKey,
+			body: thumbBuffer,
+			contentType: "image/webp",
+		});
+	}
+
+	return { url, thumbnailUrl, key, size: outputBuffer.byteLength, contentType: outputContentType };
 }
 
 uploadsRoutes.post(
