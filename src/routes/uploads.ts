@@ -7,7 +7,7 @@ import type { IncomingMessage } from "node:http";
 import { authMiddleware, requirePermission } from "../middleware/auth";
 import { PERMISSIONS } from "../lib/permissions";
 import { uploadImage } from "../lib/s3";
-import { ipRateLimit } from "../middleware/rate-limit";
+import { ipRateLimit, userRateLimit } from "../middleware/rate-limit";
 import { logger } from "../lib/logger";
 import { resolveHostSafe } from "../lib/ssrf-guard";
 import { isAllowedMediaUrl } from "../lib/url-allowlist";
@@ -65,7 +65,12 @@ function fetchPinned(
 	});
 }
 
-const uploadLimit = ipRateLimit({ keyPrefix: "upload", limit: 20, windowSeconds: 60 * 15 });
+// Two-layer throttle: IP guard catches pre-auth abuse / shared-NAT bots; the
+// per-user layer is the realistic ceiling for an authenticated author. The
+// per-user limit must be higher because rehosting a pasted article can fan out
+// dozens of /from-url calls in seconds.
+const uploadIpLimit = ipRateLimit({ keyPrefix: "upload", limit: 100, windowSeconds: 60 * 15 });
+const uploadUserLimit = userRateLimit({ keyPrefix: "upload", limit: 200, windowSeconds: 60 * 15 });
 
 export const uploadsRoutes = new Hono();
 
@@ -164,8 +169,9 @@ async function processAndUpload(
 
 uploadsRoutes.post(
 	"/image",
-	uploadLimit,
+	uploadIpLimit,
 	authMiddleware,
+	uploadUserLimit,
 	requirePermission(PERMISSIONS.MEDIA_UPLOAD),
 	async (c) => {
 		const user = c.get("user");
@@ -211,8 +217,9 @@ uploadsRoutes.post(
 // pixels and broken images when the source disappears.
 uploadsRoutes.post(
 	"/from-url",
-	uploadLimit,
+	uploadIpLimit,
 	authMiddleware,
+	uploadUserLimit,
 	requirePermission(PERMISSIONS.MEDIA_UPLOAD),
 	async (c) => {
 		const user = c.get("user");
