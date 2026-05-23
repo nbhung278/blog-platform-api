@@ -43,7 +43,7 @@ readingProgressRoutes.post(
 		// progress on a deleted/private post would just create orphan rows
 		// the cleanup job has to mop up.
 		const post = await prisma.post.findFirst({
-			where: { id: postId, status: "published", deletedAt: null },
+			where: { id: postId, status: "published" },
 			select: { id: true },
 		});
 		if (!post) return c.json({ error: "Post not found" }, 404);
@@ -117,10 +117,7 @@ readingProgressRoutes.get(
 			where: {
 				userId: user.sub,
 				progress: { gte: RESUME_MIN_PROGRESS, lt: RESUME_MAX_PROGRESS },
-				// Exclude deleted/unpublished posts so the rail never shows a
-				// 404-on-click card. The author may have unpublished a draft after
-				// the user started reading.
-				post: { deletedAt: null, status: "published" },
+				post: { status: "published" },
 			},
 			orderBy: { updatedAt: "desc" },
 			take: limit,

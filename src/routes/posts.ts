@@ -148,7 +148,6 @@ postsRoutes.get("/", authMiddleware, async (c) => {
 	const wantAll = scope === "all" && canSeeAll;
 
 	const where = {
-		deletedAt: null,
 		...(wantAll ? {} : { userId: user.sub }),
 		...(statusFilter && POST_STATUSES.includes(statusFilter) ? { status: statusFilter } : {}),
 		...(categoryId ? { categories: { some: { categoryId } } } : {}),
@@ -205,7 +204,7 @@ postsRoutes.post(
 
 		// Fetch all posts to check ownership
 		const posts = await prisma.post.findMany({
-			where: { id: { in: ids }, deletedAt: null },
+			where: { id: { in: ids } },
 			select: { id: true, userId: true, coverUrl: true, contentHtml: true },
 		});
 
@@ -228,10 +227,8 @@ postsRoutes.post(
 		}
 
 		const targetIds = targets.map((p) => p.id);
-		const now = new Date();
-		const result = await prisma.post.updateMany({
-			where: { id: { in: targetIds }, deletedAt: null },
-			data: { deletedAt: now },
+		const result = await prisma.post.deleteMany({
+			where: { id: { in: targetIds } },
 		});
 
 		// Fire-and-forget S3 cleanup. Each post's cover is only deleted if the
@@ -279,7 +276,7 @@ postsRoutes.get(
 		const cursor = c.req.query("cursor");
 
 		const result = await prisma.post.findMany({
-			where: { status: "published", deletedAt: null },
+			where: { status: "published" },
 			orderBy: [{ publishedAt: "desc" }, { id: "desc" }],
 			take: limit + 1,
 			...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -303,7 +300,7 @@ postsRoutes.get(
 		const limit = Math.min(Math.max(Number(c.req.query("limit")) || 4, 1), 12);
 
 		const posts = await prisma.post.findMany({
-			where: { status: "published", deletedAt: null },
+			where: { status: "published" },
 			orderBy: [{ viewCount: "desc" }, { publishedAt: "desc" }, { id: "desc" }],
 			take: limit,
 			select: POST_LIST_SELECT,
@@ -356,7 +353,7 @@ postsRoutes.get(
 				FROM posts p
 				JOIN post_categories pc ON pc.post_id = p.id
 				JOIN categories c ON c.id = pc.category_id
-				WHERE p.status = 'published' AND p.deleted_at IS NULL
+				WHERE p.status = 'published'
 			) t
 			WHERE rn <= ${perCategory}
 			ORDER BY category_name ASC, rn ASC
@@ -431,12 +428,10 @@ postsRoutes.get(
 		const where = categorySlug
 			? {
 					status: "published" as const,
-					deletedAt: null,
 					categories: { some: { category: { slug: categorySlug } } },
 				}
 			: {
 					status: "published" as const,
-					deletedAt: null,
 					OR: [
 						{ title: { contains: q, mode: "insensitive" as const } },
 						{ tags: { has: q } },
@@ -485,7 +480,7 @@ postsRoutes.get("/id/:id", authMiddleware, async (c) => {
 		},
 	});
 
-	if (!post || post.deletedAt) {
+	if (!post) {
 		return c.json({ error: "Post not found" }, 404);
 	}
 
@@ -512,7 +507,7 @@ postsRoutes.get("/my-drafts", authMiddleware, async (c) => {
 	const limit = Math.min(Math.max(Number(c.req.query("limit")) || 3, 1), 10);
 
 	const drafts = await prisma.post.findMany({
-		where: { userId: user.sub, status: "draft", deletedAt: null },
+		where: { userId: user.sub, status: "draft" },
 		orderBy: { updatedAt: "desc" },
 		take: limit,
 		select: {
@@ -582,10 +577,10 @@ postsRoutes.patch(
 
 		const existing = await prisma.post.findUnique({
 			where: { id: postId },
-			select: { userId: true, status: true, deletedAt: true, version: true },
+			select: { userId: true, status: true, version: true },
 		});
 
-		if (!existing || existing.deletedAt) {
+		if (!existing) {
 			return c.json({ error: "Post not found" }, 404);
 		}
 
@@ -634,7 +629,7 @@ postsRoutes.get(
 		const slug = c.req.param("slug");
 
 		const post = await prisma.post.findFirst({
-			where: { slug, status: "published", deletedAt: null },
+			where: { slug, status: "published" },
 			include: {
 				user: { select: { id: true, name: true, username: true, avatarUrl: true } },
 				categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
@@ -681,7 +676,6 @@ postsRoutes.get(
 		const result = await prisma.post.findMany({
 			where: {
 				user: { username },
-				deletedAt: null,
 				...(isOwner
 					? { status: { in: ["draft", "pending", "published", "rejected"] } }
 					: { status: "published" }),
@@ -781,12 +775,11 @@ postsRoutes.patch(
 				userId: true,
 				status: true,
 				publishedAt: true,
-				deletedAt: true,
 				coverUrl: true,
 			},
 		});
 
-		if (!existing || existing.deletedAt) {
+		if (!existing) {
 			return c.json({ error: "Post not found" }, 404);
 		}
 
@@ -876,10 +869,10 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 
 	const existing = await prisma.post.findUnique({
 		where: { id: postId },
-		select: { userId: true, deletedAt: true, coverUrl: true, contentHtml: true },
+		select: { userId: true, coverUrl: true, contentHtml: true },
 	});
 
-	if (!existing || existing.deletedAt) {
+	if (!existing) {
 		return c.json({ error: "Post not found" }, 404);
 	}
 
@@ -891,11 +884,9 @@ postsRoutes.delete("/:id", authMiddleware, async (c) => {
 		return c.json({ error: "Forbidden" }, 403);
 	}
 
-	await prisma.post.update({ where: { id: postId }, data: { deletedAt: new Date() } });
+	await prisma.post.delete({ where: { id: postId } });
 
-	// Free the cover from S3. Soft-delete keeps the row for audit/restore, but
-	// the file is dead weight either way and storage adds up. If we add a
-	// restore endpoint later, drop this and sweep on hard-delete instead.
+	// Free the cover from S3.
 	// Ownership-scoped: refuses to delete a key whose path doesn't match the
 	// post owner — defends against coverUrl pointing at someone else's file.
 	const key = extractOwnedS3Key(existing.coverUrl, existing.userId);

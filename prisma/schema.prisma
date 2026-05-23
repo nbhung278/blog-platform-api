@@ -185,7 +185,6 @@ model Post {
   version     Int       @default(1)
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at")
-  deletedAt   DateTime? @map("deleted_at")
 
   user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   analyticsEvents AnalyticsEvent[]
@@ -200,7 +199,6 @@ model Post {
   @@index([status])
   @@index([publishedAt(sort: Desc)])
   @@index([userId])
-  @@index([deletedAt])
   @@map("posts")
 }
 

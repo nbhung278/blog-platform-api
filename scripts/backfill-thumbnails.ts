@@ -63,7 +63,6 @@ async function main() {
 		where: {
 			coverUrl: { not: null },
 			thumbnailUrl: null,
-			deletedAt: null,
 		},
 		select: { id: true, coverUrl: true, userId: true },
 		orderBy: { createdAt: "asc" },

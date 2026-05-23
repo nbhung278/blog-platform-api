@@ -108,29 +108,23 @@ categoriesRoutes.patch(
 	},
 );
 
-// [auth] Delete category — blocked if any posts are still assigned
+// [auth] Delete category — hard-deletes all posts in the category first
 categoriesRoutes.delete(
 	"/:id",
 	authMiddleware,
 	requirePermission(PERMISSIONS.CATEGORY_MANAGE),
 	async (c) => {
 		const id = c.req.param("id");
-		const existing = await prisma.category.findUnique({
-			where: { id },
-			include: { _count: { select: { posts: true } } },
-		});
+		const existing = await prisma.category.findUnique({ where: { id } });
 		if (!existing) return c.json({ error: "Category not found" }, 404);
 
-		if (existing._count.posts > 0) {
-			return c.json(
-				{
-					error: `Cannot delete: ${existing._count.posts} post(s) are still assigned to this category.`,
-				},
-				409,
-			);
-		}
+		await prisma.$transaction([
+			prisma.post.deleteMany({
+				where: { categories: { some: { categoryId: id } } },
+			}),
+			prisma.category.delete({ where: { id } }),
+		]);
 
-		await prisma.category.delete({ where: { id } });
 		return c.json({ success: true });
 	},
 );

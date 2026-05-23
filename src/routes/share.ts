@@ -321,7 +321,7 @@ shareRoutes.get(
 		const slug = c.req.param("slug");
 
 		const post = await prisma.post.findFirst({
-			where: { slug, status: "published", deletedAt: null, user: { username } },
+			where: { slug, status: "published", user: { username } },
 			select: {
 				title: true,
 				excerpt: true,

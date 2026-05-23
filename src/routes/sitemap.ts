@@ -71,7 +71,7 @@ sitemapRoutes.get("/", async (c) => {
 		build: async () => {
 			const [posts, categories] = await Promise.all([
 				prisma.post.findMany({
-					where: { status: "published", deletedAt: null },
+					where: { status: "published" },
 					select: { slug: true, updatedAt: true, user: { select: { username: true } } },
 					orderBy: { updatedAt: "desc" },
 				}),

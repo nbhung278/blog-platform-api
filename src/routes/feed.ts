@@ -43,7 +43,7 @@ type FeedPost = {
 
 async function loadFeedPosts(): Promise<FeedPost[]> {
 	return prisma.post.findMany({
-		where: { status: "published", deletedAt: null },
+		where: { status: "published" },
 		orderBy: [{ publishedAt: "desc" }, { updatedAt: "desc" }],
 		take: FEED_POST_LIMIT,
 		select: {

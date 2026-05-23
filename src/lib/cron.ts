@@ -30,21 +30,6 @@ async function withLock<T>(name: string, fn: () => Promise<T>): Promise<T | unde
 	}
 }
 
-// Soft-deleted posts retained for 30 days, then hard-deleted. The window
-// matches the UI's "restore from trash" affordance — beyond that, the user
-// has effectively forgotten about it and the content is taking up storage.
-const SOFT_DELETED_POST_TTL_DAYS = 30;
-
-async function purgeOldSoftDeletedPosts(): Promise<void> {
-	const cutoff = new Date(Date.now() - SOFT_DELETED_POST_TTL_DAYS * 24 * 60 * 60 * 1000);
-	const result = await prisma.post.deleteMany({
-		where: { deletedAt: { not: null, lt: cutoff } },
-	});
-	if (result.count > 0) {
-		logger.info({ count: result.count }, "[cron] purged soft-deleted posts");
-	}
-}
-
 // Refresh tokens hang around forever unless we clean them up — every login
 // adds another row, and revoked tokens are useless after their original
 // expiresAt. Drop anything fully expired by a 7-day grace window (matches
@@ -72,27 +57,11 @@ async function purgeOldReadNotifications(): Promise<void> {
 	}
 }
 
-// Reading progress rows for posts that were hard-deleted (or that the
-// post-delete cascade missed). Belt-and-suspenders cleanup — the FK should
-// cover post deletion, but soft-deleted posts that later got purged above
-// can leave dangling rows.
-async function purgeOrphanReadingProgress(): Promise<void> {
-	const result = await prisma.$executeRaw`
-		DELETE FROM reading_progress rp
-		WHERE NOT EXISTS (SELECT 1 FROM posts p WHERE p.id = rp.post_id)
-	`;
-	if (result > 0) {
-		logger.info({ count: result }, "[cron] purged orphan reading progress");
-	}
-}
-
 type Job = { name: string; run: () => Promise<void> };
 
 const JOBS: Job[] = [
-	{ name: "purge-soft-deleted-posts", run: purgeOldSoftDeletedPosts },
 	{ name: "purge-expired-refresh-tokens", run: purgeExpiredRefreshTokens },
 	{ name: "purge-old-read-notifications", run: purgeOldReadNotifications },
-	{ name: "purge-orphan-reading-progress", run: purgeOrphanReadingProgress },
 ];
 
 async function runCleanupCycle(): Promise<void> {
