@@ -31,7 +31,7 @@ const categorySchema = z.object({
 
 // Public: list all categories (includes postCount)
 categoriesRoutes.get("/", readLimit, async (c) => {
-	c.header("Cache-Control", "public, s-maxage=300, stale-while-revalidate=60");
+	c.header("Cache-Control", "no-store");
 	const categories = await prisma.category.findMany({
 		orderBy: { name: "asc" },
 		include: { _count: { select: { posts: true } } },
