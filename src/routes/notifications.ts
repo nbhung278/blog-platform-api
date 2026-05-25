@@ -94,3 +94,39 @@ notificationsRoutes.post("/mark-all-read", markReadLimit, authMiddleware, async 
 	publishToUser(me.sub, { kind: "unread_count", count: 0 });
 	return c.json({ success: true });
 });
+
+// Delete a single notification owned by the caller. We scope by userId in the
+// where clause so a leaked id from another account is a no-op (deleteMany
+// returns count: 0 rather than throwing).
+notificationsRoutes.delete(
+	"/:id",
+	markReadLimit,
+	authMiddleware,
+	zValidator("param", z.object({ id: z.string().uuid() })),
+	async (c) => {
+		const me = c.get("user");
+		const { id } = c.req.valid("param");
+
+		const result = await prisma.notification.deleteMany({
+			where: { id, userId: me.sub },
+		});
+
+		if (result.count > 0) {
+			const count = await prisma.notification.count({
+				where: { userId: me.sub, isRead: false },
+			});
+			publishToUser(me.sub, { kind: "unread_count", count });
+		}
+
+		return c.json({ success: true });
+	},
+);
+
+// Bulk-delete all already-read notifications for the caller.
+notificationsRoutes.post("/delete-read", markReadLimit, authMiddleware, async (c) => {
+	const me = c.get("user");
+	const result = await prisma.notification.deleteMany({
+		where: { userId: me.sub, isRead: true },
+	});
+	return c.json({ success: true, deleted: result.count });
+});
