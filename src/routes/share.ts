@@ -313,6 +313,202 @@ function renderShareHtml(opts: {
 </html>`;
 }
 
+// Author profile share HTML for crawlers.
+//
+// Mirrors /share/:username/:slug but for /author/<username>. Google was logging
+// these URLs (referenced from JSON-LD on posts + the Atom feed) as
+// "Crawled - currently not indexed" because the SPA shell has no per-author
+// content. We render a real page with the author's name, bio, and a list of
+// their published posts so the URL has enough signal to index.
+function renderAuthorShareHtml(opts: {
+	name: string;
+	username: string;
+	bio: string | null;
+	avatarUrl: string | null;
+	url: string;
+	posts: { title: string; slug: string; excerpt: string | null; publishedAt: Date | null }[];
+	postCount: number;
+	skipRedirect?: boolean;
+}): string {
+	const { name, username, bio, avatarUrl, url, posts, postCount, skipRedirect } = opts;
+
+	const title = `${name} (@${username}) — Strix`;
+	const description =
+		bio?.trim() ||
+		(postCount > 0
+			? `Read ${postCount} post${postCount === 1 ? "" : "s"} by ${name} on Strix — a blog about software engineering and the craft of building products.`
+			: `${name} on Strix — a blog about software engineering and the craft of building products.`);
+
+	const safeTitle = escapeAttr(title);
+	const safeDesc = escapeAttr(description);
+	const safeUrl = escapeAttr(url);
+	const safeName = escapeHtml(name);
+	const safeUsername = escapeHtml(username);
+
+	const ogImageTag = avatarUrl
+		? `<meta property="og:image" content="${escapeAttr(avatarUrl)}" />
+		<meta property="og:image:alt" content="${escapeAttr(name)}" />`
+		: "";
+	const twitterImageTag = avatarUrl
+		? `<meta name="twitter:image:src" content="${escapeAttr(avatarUrl)}" />`
+		: "";
+	// Avatars are square thumbnails, not hero images — `summary` is the right
+	// Twitter card type regardless of whether we have an avatar URL.
+	const twitterCard = "summary";
+
+	// JSON-LD ProfilePage with an embedded ItemList of recent posts. The
+	// ItemList tells Google "this URL is an authoritative author landing page",
+	// which is the signal it uses to upgrade soft-404 verdicts.
+	const jsonLd: Record<string, unknown> = {
+		"@context": "https://schema.org",
+		"@type": "ProfilePage",
+		mainEntity: {
+			"@type": "Person",
+			name,
+			alternateName: `@${username}`,
+			url,
+			...(bio ? { description: bio } : {}),
+			...(avatarUrl ? { image: avatarUrl } : {}),
+		},
+		url,
+	};
+	if (posts.length > 0) {
+		jsonLd.hasPart = posts.map((p) => ({
+			"@type": "BlogPosting",
+			headline: p.title,
+			url: `${env.APP_URL}/blog/${username}/${p.slug}`,
+			...(p.publishedAt ? { datePublished: p.publishedAt.toISOString() } : {}),
+			author: { "@type": "Person", name, url },
+		}));
+	}
+	const ldJsonHtml = JSON.stringify(jsonLd).replace(/<\//g, "<\\/");
+
+	const redirectTags = skipRedirect
+		? ""
+		: `<meta http-equiv="refresh" content="0;url=${safeUrl}" />
+		<script>window.location.replace(${JSON.stringify(url)});</script>`;
+
+	const avatarHtml = avatarUrl
+		? `<p><img src="${escapeAttr(avatarUrl)}" alt="${escapeAttr(name)}" width="120" height="120" /></p>`
+		: "";
+
+	const bioHtml = bio ? `<p>${escapeHtml(bio)}</p>` : "";
+
+	const postsListHtml =
+		posts.length > 0
+			? `<h2>Recent posts by ${safeName}</h2>
+		<ul>
+			${posts
+				.map((p) => {
+					const postUrl = `${env.APP_URL}/blog/${username}/${p.slug}`;
+					const excerpt = p.excerpt?.trim();
+					return `<li>
+						<a href="${escapeAttr(postUrl)}">${escapeHtml(p.title)}</a>
+						${excerpt ? `<p>${escapeHtml(excerpt)}</p>` : ""}
+					</li>`;
+				})
+				.join("\n\t\t\t")}
+		</ul>`
+			: `<p>No posts published yet.</p>`;
+
+	const profileBody = skipRedirect
+		? `<main>
+			<h1>${safeName}</h1>
+			<p><em>@${safeUsername}</em></p>
+			${avatarHtml}
+			${bioHtml}
+			${postsListHtml}
+		</main>`
+		: `<p>Redirecting to <a href="${safeUrl}">${safeName}'s profile</a>…</p>`;
+
+	return `<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>${safeTitle}</title>
+	<meta name="description" content="${safeDesc}" />
+
+	<meta property="og:type" content="profile" />
+	<meta property="og:url" content="${safeUrl}" />
+	<meta property="og:title" content="${safeTitle}" />
+	${ogImageTag}
+	<meta property="og:description" content="${safeDesc}" />
+	<meta property="og:site_name" content="Strix" />
+	<meta property="profile:username" content="${escapeAttr(username)}" />
+
+	<meta name="twitter:card" content="${twitterCard}" />
+	<meta name="twitter:title" content="${safeTitle}" />
+	<meta name="twitter:description" content="${safeDesc}" />
+	${twitterImageTag}
+
+	<link rel="canonical" href="${safeUrl}" />
+	${redirectTags}
+	<script type="application/ld+json">${ldJsonHtml}</script>
+</head>
+<body>
+	${profileBody}
+</body>
+</html>`;
+}
+
+shareRoutes.get(
+	"/author/:username",
+	ipRateLimit({ keyPrefix: "share-preview-author", limit: 120, windowSeconds: 60 }),
+	async (c) => {
+		const username = c.req.param("username");
+
+		const user = await prisma.user.findUnique({
+			where: { username },
+			select: { name: true, username: true, bio: true, avatarUrl: true },
+		});
+
+		const canonical = `${env.APP_URL}/author/${username}`;
+
+		if (!user) {
+			c.header("Content-Type", "text/html; charset=utf-8");
+			c.header("Cache-Control", "no-store");
+			return c.body(
+				`<!doctype html><html><head>
+					<meta http-equiv="refresh" content="0;url=${escapeAttr(canonical)}" />
+					<script>window.location.replace(${JSON.stringify(canonical)});</script>
+				</head><body></body></html>`,
+				404,
+			);
+		}
+
+		// Cap the post list at 20 — enough for crawlers to see the page has
+		// substance without ballooning HTML size for high-volume authors.
+		const [posts, postCount] = await Promise.all([
+			prisma.post.findMany({
+				where: { status: "published", user: { username } },
+				select: { title: true, slug: true, excerpt: true, publishedAt: true },
+				orderBy: { publishedAt: "desc" },
+				take: 20,
+			}),
+			prisma.post.count({ where: { status: "published", user: { username } } }),
+		]);
+
+		const skipRedirect = c.req.query("bot") === "1";
+
+		const html = renderAuthorShareHtml({
+			name: user.name ?? user.username,
+			username: user.username,
+			bio: user.bio,
+			avatarUrl: user.avatarUrl,
+			url: canonical,
+			posts,
+			postCount,
+			skipRedirect,
+		});
+
+		c.header("Content-Type", "text/html; charset=utf-8");
+		c.header("Cache-Control", "public, s-maxage=300, stale-while-revalidate=600");
+		c.header("X-Frame-Options", "SAMEORIGIN");
+		return c.body(html);
+	},
+);
+
 shareRoutes.get(
 	"/:username/:slug",
 	ipRateLimit({ keyPrefix: "share-preview", limit: 120, windowSeconds: 60 }),

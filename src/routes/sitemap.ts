@@ -13,6 +13,7 @@ const APP_URL = env.APP_URL.replace(/\/$/, "");
 function buildSitemap(
 	posts: { slug: string; updatedAt: Date; user: { username: string } }[],
 	categories: { name: string }[],
+	authors: { username: string; latestPostAt: Date | null }[],
 ): string {
 	// `/search` is excluded: it's a query-driven page with no canonical content,
 	// so listing it just wastes crawl budget without ever ranking. Same reason
@@ -52,7 +53,18 @@ function buildSitemap(
 		priority: "0.8",
 	}));
 
-	const allUrls = [...staticUrls, ...categoryUrls, ...postUrls];
+	// Author profile pages. Only authors who have at least one *published*
+	// post — otherwise the page would be empty and Google would re-mark it as
+	// soft-404. `lastmod` reflects their newest post so re-crawls trigger when
+	// they publish.
+	const authorUrls: Entry[] = authors.map((a) => ({
+		loc: `${APP_URL}/author/${a.username}`,
+		lastmod: a.latestPostAt?.toISOString().split("T")[0],
+		changefreq: "weekly",
+		priority: "0.5",
+	}));
+
+	const allUrls = [...staticUrls, ...categoryUrls, ...authorUrls, ...postUrls];
 
 	const urlEntries = allUrls
 		.map((u) => {
@@ -69,7 +81,7 @@ sitemapRoutes.get("/", async (c) => {
 		cacheKey: CACHE_KEY,
 		cacheTtlSeconds: CACHE_TTL,
 		build: async () => {
-			const [posts, categories] = await Promise.all([
+			const [posts, categories, authorRows] = await Promise.all([
 				prisma.post.findMany({
 					where: { status: "published" },
 					select: { slug: true, updatedAt: true, user: { select: { username: true } } },
@@ -79,8 +91,37 @@ sitemapRoutes.get("/", async (c) => {
 					select: { name: true },
 					orderBy: { name: "asc" },
 				}),
+				// One row per author who has ≥1 published post, with the publish
+				// time of their newest post for `lastmod`. groupBy keeps this a
+				// single query — important because the sitemap rebuilds hourly
+				// and is also fetched directly by Googlebot via the worker proxy.
+				prisma.post.groupBy({
+					by: ["userId"],
+					where: { status: "published" },
+					_max: { publishedAt: true },
+				}),
 			]);
-			return buildSitemap(posts, categories);
+
+			// groupBy returns userIds; we need usernames. Single follow-up
+			// findMany keyed by the ids we just saw.
+			const authorIds = authorRows.map((r) => r.userId);
+			const users =
+				authorIds.length > 0
+					? await prisma.user.findMany({
+							where: { id: { in: authorIds } },
+							select: { id: true, username: true },
+						})
+					: [];
+			const usernameById = new Map(users.map((u) => [u.id, u.username]));
+			const authors = authorRows
+				.map((r) => ({
+					username: usernameById.get(r.userId) ?? null,
+					latestPostAt: r._max.publishedAt,
+				}))
+				.filter((a): a is { username: string; latestPostAt: Date | null } => !!a.username)
+				.sort((a, b) => a.username.localeCompare(b.username));
+
+			return buildSitemap(posts, categories, authors);
 		},
 	});
 	return c.text(xml, 200, { "Content-Type": "application/xml" });
